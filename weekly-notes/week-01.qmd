@@ -48,3 +48,7 @@ While point-and-click software, such as ArcGIS comes easily to me, I am still a 
 - Where are all the fruit flies coming from?
 - What kind of expectations are there when it comes to coding knowledge prior to this course?
 - How can I better prepare for each class?
+
+#One thing I learned
+
+- A website has 2 parts/needs: 1) a folder of .html files 2) a computer that is always on
