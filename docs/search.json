@@ -53,21 +53,21 @@
     "href": "weekly-notes/week-01.html#proving-r-works",
     "title": "Week 1: Getting Set Up",
     "section": "Proving R Works",
-    "text": "Proving R Works\nThe chunk below runs when this page renders. If you can see a result underneath it on your published site, R and Quarto are talking to each other correctly.\n\nsessionInfo()$R.version$version.string\n\n[1] \"R version 4.6.0 (2026-04-24)\""
+    "text": "Proving R Works\nThe chunk below runs when this page renders. If you can see a result underneath it on your published site, R and Quarto are talking to each other correctly.\n\nsessionInfo()$R.version$version.string\n\n[1] \"R version 4.5.1 (2025-06-13 ucrt)\""
   },
   {
     "objectID": "weekly-notes/week-01.html#reflection",
     "href": "weekly-notes/week-01.html#reflection",
     "title": "Week 1: Getting Set Up",
     "section": "Reflection",
-    "text": "Reflection\n\nWhat I want out of this course:\nOne thing I’m nervous about:"
+    "text": "Reflection\n\nWhat I want out of this course:\nI am hoping to get a better understanding of how to code, use statistics to create better policy, and, overall, walk away with some hard and lasting skills!\nOne thing I’m nervous about:\nWhile point-and-click software, such as ArcGIS comes easily to me, I am still a new at coding and it does not come naturally to me. I am therefore nervous about keeping up with the rest of the class and contributing equally when in group projects. I am also nervous about being drawn in by the siren call of AI."
   },
   {
     "objectID": "weekly-notes/week-01.html#questions-i-still-have",
     "href": "weekly-notes/week-01.html#questions-i-still-have",
     "title": "Week 1: Getting Set Up",
     "section": "Questions I Still Have",
-    "text": "Questions I Still Have"
+    "text": "Questions I Still Have\n\nWhere are all the fruit flies coming from?\nWhat kind of expectations are there when it comes to coding knowledge prior to this course?\nHow can I better prepare for each class?"
   },
   {
     "objectID": "about.html",
@@ -102,7 +102,7 @@
     "href": "assignments/index.html",
     "title": "Assignments",
     "section": "",
-    "text": "Completed assignments for MUSA 5080. New assignments appear here automatically once you add the .qmd file to this folder and render.\n\n\n\n\n\n\n\n\n\n\n\nNo matching items"
+    "text": "Completed assignments for MUSA 5080. New assignments appear here automatically once you add the .qmd file to this folder and render.\n\n\n\n\n\n\n\n\n\n\nNo matching items"
   },
   {
     "objectID": "weekly-notes/index.html",

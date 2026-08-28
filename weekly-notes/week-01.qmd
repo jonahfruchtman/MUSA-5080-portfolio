@@ -37,9 +37,14 @@ sessionInfo()$R.version$version.string
 
 What I want out of this course:
 
+I am hoping to get a better understanding of how to code, use statistics to create better policy, and, overall, walk away with some hard and lasting skills!
+
 One thing I'm nervous about:
+
+While point-and-click software, such as ArcGIS comes easily to me, I am still a new at coding and it does not come naturally to me. I am therefore nervous about keeping up with the rest of the class and contributing equally when in group projects. I am also nervous about being drawn in by the siren call of AI.
 
 ## Questions I Still Have
 
--
--
+- Where are all the fruit flies coming from?
+- What kind of expectations are there when it comes to coding knowledge prior to this course?
+- How can I better prepare for each class?
