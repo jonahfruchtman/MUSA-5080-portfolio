@@ -1,0 +1,457 @@
+---
+title: "Assignment 2: Who Do We Know the Least About?"
+subtitle: "Measuring uncertainty in American Community Survey data"
+author: "Jonah Fruchtman"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: false
+execute:
+  warning: false
+  message: false
+---
+
+## Setup
+
+```{r}
+library(tidyverse)
+library(tidycensus)
+```
+
+
+---
+
+## The question
+
+**In the following report, I will be investigating commuting patterns by race/ethnicity via public transportation in New Jersey, and ask which counties and ethnicities are measured most and least reliably. Since I will specifically be paying attention to margin of error, I cannot directly calculate percentage of people who commute via public transportation, and so will rely on the absolute number and will use total commuters by race/ethnicity as a point of comparison. **
+
+---
+
+## Choosing what to measure
+
+```{r}
+vars <- load_variables(2023, "acs5")
+View(vars)
+NJ <- "NJ"
+variables <- c(
+  total_white = "B08505H_001",
+  transp_white = "B08505H_004",
+  total_black = "B08505B_001",
+  transp_black = "B08505B_004",
+  total_asian = "B08505D_001",
+  transp_asian = "B08505D_004",
+  total_hisp = "B08505I_001",
+  transp_hisp = "B08505I_004",
+  pop   = "B01003_001")
+```
+
+## Pulling the data
+
+```{r}
+county_data <- get_acs(
+  geography = "county",
+  variables = variables,
+  state = "NJ",
+  year = 2023,
+  survey = "acs5",
+  output = "wide"
+)
+```
+
+Let's look at what came back.
+
+```{r}
+dim(county_data)
+head(county_data)
+```
+
+New Jersey has 21 counties; Originally, my data frame had 168 rows, as it was "long" data and therefore had a row for every variable within a county. However, I then pulled it as "wide" data using the "output" command so that there there would be one row per county and the variables would be columns.
+
+
+---
+
+## How big is the margin of error?
+
+A margin of error of 3,000 means something very different for an estimate of 20,000
+than for an estimate of 200,000. To compare across places, I calculated it as a
+percentage.
+
+```{r}
+county_data <- county_data %>%
+  mutate(
+    moe_p_ttl_white = total_whiteM / total_whiteE *100,
+    moe_p_transp_white = transp_whiteM / transp_whiteE *100,
+    moe_p_ttl_black = total_blackM / total_blackE *100,
+    moe_p_transp_black = transp_blackM / transp_blackE *100,
+    moe_p_ttl_asian = total_asianM / total_asianE *100,
+    moe_p_transp_asian = transp_asianM / transp_asianE *100,
+    moe_p_ttl_hisp = total_hispM / total_hispE *100,
+    moe_p_transp_hisp = transp_hispM / transp_hispE *100)
+```
+
+
+I then organized the data by least to most reliable by each ethnicity/race and listed the least reliable in each category at the end.
+
+```{r}
+#Total White
+county_data %>%
+  arrange(desc(moe_p_ttl_white)) %>%
+  select(NAME, total_whiteE, total_whiteM, moe_p_ttl_white) %>%
+  head(10)
+```
+
+
+```{r}
+#White Transportation
+county_data %>%
+  arrange(desc(moe_p_transp_white)) %>%
+  select(NAME, transp_whiteE, transp_whiteM, moe_p_transp_white) %>%
+  head(10)
+```
+ 
+
+```{r}
+#Total Black
+county_data %>%
+  arrange(desc(moe_p_ttl_black)) %>%
+  select(NAME, total_blackE, total_blackM, moe_p_ttl_black) %>%
+  head(10)
+```
+
+
+
+```{r}
+#Black Transportation
+county_data %>%
+  arrange(desc(moe_p_transp_black)) %>%
+  select(NAME, transp_blackE, transp_blackM, moe_p_transp_black) %>%
+  head(10)
+```
+
+
+
+```{r}
+#Total Asian
+county_data %>%
+  arrange(desc(moe_p_ttl_asian)) %>%
+  select(NAME, total_asianE, total_asianM, moe_p_ttl_asian) %>%
+  head(10)
+```
+
+
+
+```{r}
+#Asian Transportation
+county_data %>%
+  arrange(desc(moe_p_transp_asian)) %>%
+  select(NAME, transp_asianE, transp_asianM, moe_p_transp_asian) %>%
+  head(10)
+```
+
+
+
+```{r}
+#Total Hispanic or Latino
+county_data %>%
+  arrange(desc(moe_p_ttl_hisp)) %>%
+  select(NAME, total_hispE, total_hispM, moe_p_ttl_hisp) %>%
+  head(10)
+```
+
+
+```{r}
+#Hispanic or Latino Transportation
+county_data %>%
+  arrange(desc(moe_p_transp_hisp)) %>%
+  select(NAME, transp_hispE, transp_hispM, moe_p_transp_hisp) %>%
+  head(10)
+```
+
+
+There were a number of unreliable counties that depend on race/ethnicity and whether we were looking at only commuters via public transportation or total commuters.
+
+Below are the following counties with the largest ratio of margin to error to estimate, in percent:
+
+*White*
+Total: Salem County: 5.40%
+Transportation: Salem County: 82.4%
+
+*Black*
+Total: Sussex County: 22.7%
+Transportation: Sussex County: 175%
+
+*Asian*
+Total: Cape May County: 27.8%
+Transportation: Cape May County: Undefined (as there was an estimated 0 riders, with a 30 person margin of error)
+
+*Hipanic/Latino*
+Total: Salem County: 16.1
+Transportation: Sussex County: 600
+
+
+---
+
+## Sorting counties into reliability categories
+
+Given that we have two divisions of our data (1) total commuters and (2) public transportation users, which carry very different spreads of reliability, I decided to use two different reliability scales across races/ethnicity. 
+
+To choose cutoffs for categories, I looked at two histograms of the data:
+```{r}
+moe_p_ttl <- c(county_data$moe_p_ttl_white, county_data$moe_p_ttl_black, county_data$moe_p_ttl_asian, county_data$moe_p_ttl_hisp)
+
+moe_p_ttl_hist <- hist(moe_p_ttl, col="orange",main="MOE Percentage (Total)", breaks = seq(0,40, 2))
+
+moe_p_transp <- c(county_data$moe_p_transp_white, county_data$moe_p_transp_black, county_data$moe_p_transp_asian, county_data$moe_p_transp_hisp)
+
+moe_p_transp_hist <- hist(moe_p_transp, col="blue",main="MOE Percentage (Transportation)", breaks = seq(0,600, 20))
+
+```
+
+As we can see in (1), the margin of error ratio (in percent) for all commuters  (combined), is relatively right-skewed, with most of the data below 10. It therefore seems justifiable to create the following categories: 
+- < 10 = High confidence
+- < 20 = Moderate confidence (I chose 8 as there is generally a major increase after 8%)
+- > 20 = Low confidence
+
+For (2), which is also right-skewed, and has an outlier at 600, it seems justifiable to have the following categories
+- < 40 = High confidence
+- < 80 = Medium confidence
+- < 80 = Low confidence
+
+```{r}
+#Total White categories
+county_data <- county_data %>%
+  mutate(reliability_ttl_white = case_when(
+    moe_p_ttl_white < 10  ~ "High confidence",
+    moe_p_ttl_white < 20 ~ "Moderate",
+    TRUE         ~ "Low confidence"
+  ))
+
+count(county_data, reliability_ttl_white)
+```
+
+
+```{r}
+#Total Black Categories
+county_data <- county_data %>%
+  mutate(reliability_ttl_black = case_when(
+    moe_p_ttl_black < 10  ~ "High confidence",
+    moe_p_ttl_black < 20 ~ "Moderate",
+    TRUE         ~ "Low confidence"
+  ))
+
+count(county_data, reliability_ttl_black)
+```
+
+
+
+```{r}
+#Total Asian Categories
+county_data <- county_data %>%
+  mutate(reliability_ttl_asian = case_when(
+    moe_p_ttl_asian < 10  ~ "High confidence",
+    moe_p_ttl_asian < 20 ~ "Moderate",
+    TRUE         ~ "Low confidence"
+  ))
+
+count(county_data, reliability_ttl_asian)
+```
+ 
+
+```{r}
+#Total Hispanic/Latino Categories
+county_data <- county_data %>%
+  mutate(reliability_ttl_hisp = case_when(
+    moe_p_ttl_hisp < 10  ~ "High confidence",
+    moe_p_ttl_hisp < 20 ~ "Moderate",
+    TRUE         ~ "Low confidence"
+  ))
+
+count(county_data, reliability_ttl_hisp)
+```
+
+
+```{r}
+#White Transportation Categories
+county_data <- county_data %>%
+  mutate(reliability_transp_white = case_when(
+    moe_p_transp_white < 40  ~ "High confidence",
+    moe_p_transp_white < 80 ~ "Moderate",
+    TRUE         ~ "Low confidence"
+  ))
+
+count(county_data, reliability_transp_white)
+```
+```{r}
+#Black Transportation Categories
+county_data <- county_data %>%
+  mutate(reliability_transp_black = case_when(
+    moe_p_transp_black < 40  ~ "High confidence",
+    moe_p_transp_black < 80 ~ "Moderate",
+    TRUE         ~ "Low confidence"
+  ))
+
+count(county_data, reliability_transp_black)
+```
+
+
+```{r}
+#Asian Transportation Categories
+county_data <- county_data %>%
+  mutate(reliability_transp_asian = case_when(
+    moe_p_transp_asian < 40  ~ "High confidence",
+    moe_p_transp_asian < 80 ~ "Moderate",
+    TRUE         ~ "Low confidence"
+  ))
+
+count(county_data, reliability_transp_asian)
+```
+
+```{r}
+#Hispanic/Latino Transportation Categories
+county_data <- county_data %>%
+  mutate(reliability_transp_hisp = case_when(
+    moe_p_transp_hisp < 40  ~ "High confidence",
+    moe_p_transp_hisp < 80 ~ "Moderate",
+    TRUE         ~ "Low confidence"
+  ))
+
+count(county_data, reliability_transp_hisp)
+```
+
+
+
+Reliability of counties differs both between and within race and ethnicity. As can be seen in the charts above, there is the highest reliability of white commuters -- both total and public transit. However, when looking at white public transportation riders, the number of counties with low confidence jumps to 8 counties and high confidence plummets by 9 counties. While there is high confidence for total Black commuters in 16 out of 21 counties, this confidence drops to only 11 counties for those who commute via public transportation. Asian and Hispanic/Latino show similar trends, with each also dropping in counties with high confidence and gaining in moderate and low confidence. 
+
+---
+
+## Is the margin of error bigger in small places?
+
+To answer this, I compared the average population of counties in each reliability category.
+
+I used group_by by county and reliability per race/ethnicity, and summarized by average population in order to isolate just the average populations and count for each confidence level. I then arranged it by average population in descending order in order to better assess the change in decreasing average populations to confidence levels.
+
+```{r}
+#Total White
+county_data %>%
+  group_by(reliability_ttl_white) %>%
+  summarize(
+    n_counties = n(),
+    avg_population = mean(popE)
+  )
+```
+ 
+
+
+```{r}
+#Total Black
+county_data %>%
+  group_by(reliability_ttl_black) %>%
+  summarize(
+    n_counties = n(),
+    avg_population = mean(popE)
+  )
+```
+
+
+```{r}
+#Total Asian
+county_data %>%
+  group_by(reliability_ttl_asian) %>%
+  summarize(
+    n_counties = n(),
+    avg_population = mean(popE)
+  )
+```
+ 
+
+```{r}
+#Total Hispanic/Latino
+county_data %>%
+  group_by(reliability_ttl_hisp) %>%
+  summarize(
+    n_counties = n(),
+    avg_population = mean(popE)
+  )
+```
+
+
+```{r}
+#Transportation White
+county_data %>%
+  group_by(reliability_transp_white) %>%
+  summarize(
+    n_counties = n(),
+    avg_population = mean(popE)
+  )
+```
+ 
+
+
+```{r}
+#Transportation Black
+transBlack <- county_data %>%
+  group_by(reliability_transp_black) %>%
+  summarize(
+    n_counties = n(),
+    avg_population = mean(popE)
+  )
+```
+ 
+
+```{r}
+#Transportation Asian
+county_data %>%
+  group_by(reliability_transp_asian) %>%
+  summarize(
+    n_counties = n(),
+    avg_population = mean(popE)
+  )
+```
+
+
+```{r}
+#Transportation Hispanic/Latino
+county_data %>%
+  group_by(reliability_transp_hisp) %>%
+  summarize(
+    n_counties = n(),
+    avg_population = mean(popE)
+  )
+```
+
+
+As can be seen in the tables above, the average population of high-confidence counties varies by both user type (total and public transportation) and by race/ethnicity, but all are within ~400,000-600,000 people. With the exception of Total Black commuters, the average population of counties in each reliability category decreases as confidence dims. Said otherwise, we are more confident when there is a higher average population.
+
+
+```{r}
+#All Commuters
+RelbyPop <- county_data %>%
+  group_by(NAME, reliability_ttl_white, reliability_ttl_black, reliability_ttl_asian, reliability_ttl_hisp) %>%
+  summarize(
+    popE
+  ) %>%
+  arrange(desc(popE)) %>%
+  print(n = 21)
+```
+  
+
+```{r}
+#Public Transportation Commuters
+RelbyPop <- county_data %>%
+  group_by(NAME, reliability_transp_white, reliability_transp_black, reliability_transp_asian, reliability_transp_hisp) %>%
+  summarize(
+    popE
+  ) %>%
+  arrange(desc(popE)) %>%
+  print(n = 21)
+```
+ 
+
+---
+
+## What this means for policy
+
+
+The fact that smaller counties have lower confidence in their data being accurate can have serious consequences for policy. As can be seen in the charts above, smaller counties like Salem, Cape May, and Warren have lower confidence levels across the ethnicity/race and rider type spectrum; on the other hand, more populated counties, such as Bergen, Middlesex, and Essex, have consistently high confidence levels. When creating commuter policy for the state, residents of Bergen County are more likely to be better served as we have more complete data for them and therefore can more accurately assess their needs. On the other hand, since we have a less accurate understanding of who Salem residents are, we are left more in the dark as to how to assist them. A similar logic carries over by race; since there are more white residents within each county of New Jersey, we can have much higher confidence in the ACS data; on the other hand, since there are far fewer Asian residents, we are unable to rely upon just the ACS to give us guidance to meet their needs. For example, if we were to explore a policy aimed at increasing ridership among Asian commuters in Hunterdon County, where there are an estimated 22 Asian residents and a margin of error of 31, but we only relied on the estimated data and ignored the margin of error, we could end up over-funding in an area in which there are actually no Asian residents at all. On the other hand, in Gloucester County, where there is estimated 160 Asian residents, a margin of error of 140, and low confidence, we could end up either overfunding an areas in which there are actually 20 Asian residents, or under-funding by 87.5% if there were actually 300 Asian residents.
+The ACS is therefore an excellent tool to get a base understanding of demographics across regions, but it must be used with other outside resource, as on its own it can under- or over-predict for smaller population areas or vulnerable populations.

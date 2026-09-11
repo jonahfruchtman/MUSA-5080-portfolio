@@ -65,7 +65,7 @@ step3
 pa_income %>%
   filter(moe_pct >5) %>%
   arrange(desc(moe_pct)) %>%
-  select(NAME, estiamte, moe, moe_pct)
+  select(NAME, estimate, moe, moe_pct)
 
 worst <- pa_income %>%
   filter(moe_pct > 8) %>%
@@ -99,7 +99,7 @@ count(pa_income, reliability)
 
 #reliability               n
 #1 High confidence        26
-#2 Low cofidence           7
+#2 Low confidence           7
 #3 Moderate confidence    34
 
 #11 Two variables, and a shape problem
