@@ -1,7 +1,7 @@
 ---
 title: "Assignment 3: Margin of Error in Poverty in Philadelphia"
 description: "Fact Checking 'New Census figures on Philly neighborhoods show inequality, high numbers of whites living in poverty'"
-date: 2026-09-XX
+date: 2026-09-25
 format:
   html:
     toc: true
