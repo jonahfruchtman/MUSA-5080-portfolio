@@ -1,0 +1,764 @@
+---
+title: "Assignment 3: Margin of Error in Poverty in Philadelphia"
+description: "Fact Checking 'New Census figures on Philly neighborhoods show inequality, high numbers of whites living in poverty'"
+date: 2026-09-XX
+format:
+  html:
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    embed-resources: true
+---
+
+##Introduction
+
+In a [recent article published to WHYY](https://whyy.org/articles/new-census-figures-on-philly-neighborhoods-show-inequality-high-numbers-of-whites-living-in-poverty/) and Philly.com, Alfred Lubrano reported that the US ACS 2006-2010 and 2013-2017 five-year estimates showed a sharp increase in inequality, measured in percent in poverty and median household income, between certain neighborhoods. He found that poverty increased and median househoold income decreased across multiple neighborhoods. The most drastic changes can be seen in the the following neighborhoods:
+
+```{r}
+library(readr)
+WHYY_data <- read_csv("assignments/WHYY_data.csv")
+View(WHYY_data)
+```
+
+As can be seen from his data, Eastwick saw the highest percentage point increase in poverty rate – from 12 to 14. Germantown, with a absolute \$33,089 loss, saw the most drastic decrease in median household income across the period. On the other hand, Schuylkill-SW Center City saw the largest percentage point decrease in poverty rate, from 21 to 10%, as well as the highest absolute income increase, with it spiking by about \$31,000. These show a grow a growing income divide in Philadelphia, with the gap between the poorest and wealthiest neighborhoods getting larger.
+
+He separately reported also using the 2015-2016 and 2016-2017 one-year estimate that percent of white people in poverty skyrocketed from "14.8% to 19.4% between 2016 and 2017." Using the 2013-2017 5-year ACS, he cites poverty rates among white residents of Holmesburg have jumped from 2% to 19% in the period.
+
+These results are alarming and disturbing. They also need to be subject to further scrutiny if we are to make policy surrounding where to allocate limited city resources to address growing needs among the populace. Specifically, they need to take margin of error into account, as if they don't we could end up over- or under-allocating to the wrong neighborhoods. For example, according to Lubrano's analysis, Powelton, Hunting Park, and Mantua have the highest percent in poverty in the 2013-2017 survey and are all relatively equal. It would therefore make sense to focus allocation of further city resources to these areas; however, should we account for margin of error and find that one has the potential to be 10+ percentage points higher than another, it may affect our decision-making.
+
+This report will therefore attempt to fill in these gaps on the census tract level so that we can better track where percent poverty and median household income has changed throughout the city – both in total and by race – so that we can better plan for future allocation of city resources to the most vulnerable regions.
+
+---
+
+##1 Locating our Data
+
+```{r}
+library(tidyverse)
+library(tidycensus)
+```
+
+First, we will download the same data that Lubrano relied on for his analysis, but by census tract:
+
+1.  5-year: 2006-2010 and 2013-2017
+    a.  Total poverty rate
+    b.  White poverty rate
+    c.  median household income
+2.  1-year: 2016-2017
+    a.  White poverty rate (countywide)
+
+We are using census tracts as neighborhood boundaries are not official and can often be disputed; on the other hand, census tracts are standardized by the Federal Government. One issue here though is that census tract boundaries also change, so this may affect our results.
+
+Second, the analyses for 5-year changes have a 3-year gap in between their windows and therefore do not overlap; we can can therefore compare them with each other. However, the 1-year estimates overlap with the latter 5-year window. It is therefore best to analyze these separately as it does not take every year (2013-2015) into account.
+
+Third, the author does not specify whether for change median household income he adjusted for inflation. For this exercise, we will not adjust for inflation.
+
+Finally, the article does not state what their metric for "poverty" is. Is he looking at below 100%, 100-149%, or at or above 150%? For sake of ease, we will be using tables that ignore these percentages.
+
+Note that while the author looked specifically at "majority-white neighborhoods," we will consider all census tracts, regardless whether they are majority white.
+
+First, we will get total population, total poverty, white population, white poverty, and median household income information for 2013-2017. We can also add columns for percent in poverty and the margin of error for this percent using *moe_prop()*:
+
+```{r}
+#2013-2017
+vars <- load_variables(2017, "acs5")
+View(vars)
+
+PA <- "PA"
+variables17 <- c(
+  total_pov_17 = "B17001_002",
+  pop_17   = "B01003_001",
+  median_hh_inc_17 = "B19013_001",
+  white_pop_17 = "B17001H_001",
+  white_pov_17 = "B17001H_002")
+
+
+pov17 <- get_acs(
+  geography = "tract",
+  variables = variables17,
+  state = "PA",
+  county = "Philadelphia County",
+  year = 2017,
+  survey = "acs5",
+  output = "wide") %>%
+    mutate(
+      share_17     = total_pov_17E / pop_17E,
+      share_moe_17 = moe_prop(total_pov_17E, pop_17E,
+                           total_pov_17M, pop_17M),
+      white_share_17     = white_pov_17E / white_pop_17E,
+      white_share_moe_17 = moe_prop(white_pov_17E, white_pop_17E,
+                              white_pov_17M, white_pop_17M)
+    )
+```
+
+And we can do the same for 2006-2010:
+
+```{r}
+#2006-2010
+
+#the variable codes are the same as for 2017
+
+PA <- "PA"
+variables10 <- c(
+  total_pov_10 = "B17001_002",
+  pop_10   = "B01003_001",
+  median_hh_inc_10 = "B19013_001",
+  white_pop_10 = "B17001H_001",
+  white_pov_10 = "B17001H_002")
+
+
+pov10 <- get_acs(
+  geography = "tract",
+  variables = variables10,
+  state = "PA",
+  county = "Philadelphia County",
+  year = 2010,
+  survey = "acs5",
+  output = "wide") %>%
+  mutate(
+    share_10     = total_pov_10E / pop_10E,
+    share_moe_10 = moe_prop(total_pov_10E, pop_10E,
+                            total_pov_10M, pop_10M),
+    white_share_10     = white_pov_10E / white_pop_10E,
+    white_share_moe_10 = moe_prop(white_pov_10E, white_pop_10E,
+                                  white_pov_10M, white_pop_10M)
+  )
+```
+
+We can now join them together (and drop superfluous columns) for further analysis:
+
+```{r}
+pov_comp <- full_join(pov10,
+                      pov17,
+                      by = "GEOID",
+                      copy = FALSE) %>%
+  select(-c(NAME.y, total_pov_10E, total_pov_10M, total_pov_17E, total_pov_17M, pop_10E, pop_10M, pop_17E, pop_17M)
+)
+```
+
+While he did not state it directly, to create a comparison for 2016 to 2017 city-wide change in white poverty from the 1-year census, he must have also used the 1-year 2015-2016 ACS as well. We will therefore download data from both:
+
+First, the 2016-2017
+
+```{r}
+PA <- "PA"
+white_var17 <- c(
+  white_pop_17 = "B17001H_001",
+  white_pov_17   = "B17001H_002")
+
+
+white_pov17 <- get_acs(
+  geography = "county",
+  variables = white_var17,
+  state = "PA",
+  county = "Philadelphia County",
+  year = 2017,
+  survey = "acs1",
+  output = "wide") %>%
+  mutate(
+    white_share_17     = white_pov_17E / white_pop_17E,
+    white_share_moe_17 = moe_prop(white_pov_17E, white_pop_17E,
+                            white_pov_17M, white_pop_17M)
+  )
+
+
+
+```
+
+```{r}
+PA <- "PA"
+white_var16 <- c(
+  white_pop_16 = "B17001H_001",
+  white_pov_16   = "B17001H_002")
+
+
+white_pov16 <- get_acs(
+  geography = "county",
+  variables = white_var16,
+  state = "PA",
+  county = "Philadelphia County",
+  year = 2016,
+  survey = "acs1",
+  output = "wide") %>%
+  mutate(
+    white_share_16     = white_pov_16E / white_pop_16E,
+    white_share_moe_16 = moe_prop(white_pov_16E, white_pop_16E,
+                            white_pov_16M, white_pop_16M)
+  )
+```
+
+We can now also combine these 1-year data together into one table:
+
+```{r}
+white_pov_comp <- full_join(white_pov16,
+                      white_pov17,
+                      by = "GEOID",
+                      copy = FALSE) %>%
+  select(-c(NAME.y, white_pov_16E, white_pov_16M, white_pov_17E, white_pov_17M, white_pop_16E, white_pop_16M, white_pop_17E, white_pop_17M)
+  )
+```
+
+##2 Testing our data
+
+We tested whether the change was statistically distinguishable from zero at 90% confidence. In other words, we chekced in which tracts does the margin of error *not* cross 0.
+
+First, for change total poverty rate and white poverty rate:
+
+```{r}
+pov_change <- pov_comp %>%
+  mutate(
+    change   = `share_17` - `share_10`,
+    se_1     = `share_moe_10` / 1.645,
+    se_2     = `share_moe_17` / 1.645,
+    se_diff  = sqrt(se_1^2 + se_2^2),
+    moe_diff = se_diff * 1.645,
+    z        = change / se_diff,
+    significant = abs(z) > 1.645
+  )
+
+pov_change %>%
+  count(significant)
+
+pov_change %>%
+  filter(significant == "TRUE") %>%
+  count(change > 0 )
+
+
+white_pov_change <- pov_comp %>%
+  mutate(
+    change   = `white_share_17` - `white_share_10`,
+    se_1     = `white_share_moe_10` / 1.645,
+    se_2     = `white_share_moe_17` / 1.645,
+    se_diff  = sqrt(se_1^2 + se_2^2),
+    moe_diff = se_diff * 1.645,
+    z        = change / se_diff,
+    significant = abs(z) > 1.645
+  )
+
+white_pov_change %>%
+  count(significant)
+
+white_pov_change %>%
+  filter(significant == "TRUE") %>%
+  count(change > 0 )
+
+white_pov_change1yr <- white_pov_comp %>%
+  mutate(
+    change   = `white_share_17` - `white_share_16`,
+    se_1     = `white_share_moe_16` / 1.645,
+    se_2     = `white_share_moe_17` / 1.645,
+    se_diff  = sqrt(se_1^2 + se_2^2),
+    moe_diff = se_diff * 1.645,
+    z        = change / se_diff,
+    significant = abs(z) > 1.645
+  )
+
+white_pov_change1yr %>%
+  count(significant)
+
+white_pov_change1yr %>%
+  filter(significant == "TRUE") %>%
+  count(change > 0 )
+```
+
+As can be seen in the tables above, we found that for the total poverty rate, the change is statistically significant in only 66 census tracts and not statistically significant in 310 tracts. 8 census tracts are NA. These are all non-populated areas of Philadelphia, such as the airports, parks, and stadium district. They will therefore be disregarded for the remainder of the report. We can also see that of these 66 tracts, 37 (56%) saw an increase in poverty rate.
+
+For the white poverty rate at the 5-year level, only 62 tracts are statistically significant, while 304 are not. 18 are NA because they are either non-populated or have a very low number of estimated white residents. And for these 36 tracts (58%) saw an increase in percentage of white people in poverty.
+
+Then at the 1-year level (without directly comparing it to the 5-year), we can also see that the single reading for Philadelphia is statistically significant and that there was an overall increase in percentage of white people in poverty.
+
+We then visualized the positive and negative change in the total and white poverty rate between the two periods and margins of error among the 15 census tracts with the absolute highest change in each category (increase vs decrease). We opted for 15 observations as this would still capture a large portion of census tracts, but still be concise for readability. Of course, for the 1-year change, we have only one observation:
+
+```{r}
+#Total
+#Increase in Poverty Rate
+pov_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  filter (change > 0) %>%
+  arrange(desc(change)) %>%
+  slice_head(n = 15) %>%
+  ggplot(aes(x = reorder(NAME, change), y = change)) +
+  geom_col(fill = "red") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant increase in poverty rate",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Pct Point Change in percentage of people below poverty level")
+
+#Decrease in Poverty Rate
+pov_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  filter (change < 0) %>%
+  arrange(change) %>%
+  slice_head(n = 15) %>%
+  ggplot(aes(x = reorder(NAME, change), y = change)) +
+  geom_col(fill = "blue") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant decrease in poverty rate",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Pct Point Change in percentage of people below poverty level")
+
+
+#White
+#Increase in White Poverty Rate
+white_pov_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  filter (change > 0) %>%
+  arrange(desc(change)) %>%  
+  slice_head(n = 15) %>%
+  ggplot(aes(x = reorder(NAME, change), y = change)) +
+  geom_col(fill = "red") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant increase in white poverty rate",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Pct Point Change in percentage of people below poverty level")
+
+#Decrease in White Poverty Rate
+white_pov_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  filter (change < 0) %>%
+  arrange(change) %>%  
+  slice_head(n = 15) %>%
+  ggplot(aes(x = reorder(NAME, change), y = change)) +
+  geom_col(fill = "blue") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant decrease in white poverty rate",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Pct Point Change in percentage of people below poverty level")
+
+
+#Poverty 1-year
+white_pov_change1yr %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  arrange(desc(abs(change))) %>%
+  slice_head(n = 1) %>%
+  ggplot(aes(x = reorder(NAME, change), y = change)) +
+  geom_col(aes(fill = change > 0)) +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant change in white poverty rate",
+       subtitle = "2015–2016 vs 2016–2017, ACS 1-year estimates",
+       x = NULL, y = "Pct Point Change in percentage of people below poverty level")
+```
+
+pov_change %\>%
+
+filter(significant) %\>% #just keeping the ones that are significant
+
+mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %\>%
+
+filter (change \< 0) %\>%
+
+arrange(change) %\>%
+
+slice_head(n = 15) %\>%
+
+ggplot(aes(x = reorder(NAME, change), y = change)) +
+
+geom_col(aes(fill = change \> 0)) +
+
+geom_errorbar(aes(ymin = change - moe_diff,
+
+ymax = change + moe_diff), width = 0.3) +
+
+geom_hline(yintercept = 0, linetype = "dashed") +
+
+coord_flip() +
+
+theme_minimal() +
+
+We then performed the same analysis for change in median household income:
+
+```{r}
+inc_change <- pov_comp %>%
+  mutate(
+    change   = `median_hh_inc_17E` - `median_hh_inc_10E`,
+    se_1     = `median_hh_inc_10M` / 1.645,
+    se_2     = `median_hh_inc_17M` / 1.645,
+    se_diff  = sqrt(se_1^2 + se_2^2),
+    moe_diff = se_diff * 1.645,
+    z        = change / se_diff,
+    significant = abs(z) > 1.645
+  )
+
+inc_change %>%
+  count(significant)
+
+inc_change %>%
+  filter(significant == "TRUE") %>%
+  count(change < 0 )
+```
+
+As can be seen above, 78 census tracts are now statistically significant and 296 are not – slightly better than poverty rate. Here there are two additional NA census tracts, since they had an estimated population, but not an estimated median household income. They will also be disregarded for future analysis. Of these 78 tracts, only 12 (15%) had median household income decrease.
+
+We also visualized the change in median household income between the two periods and margins of error among the 75 census tracts with the absolute highest change. Here we also opted for 15 observations per category:
+
+```{r}
+#Positive
+inc_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  filter (change > 0) %>%
+  arrange(desc(change)) %>%
+  slice_head(n = 15) %>%
+  ggplot(aes(x = reorder(NAME, change), y = change)) +
+  geom_col(fill = "blue") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant increase in 
+       median household income",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Absolute Change in Median Household Income")
+
+#Negative
+inc_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  filter (change < 0) %>%
+  arrange(change) %>%
+  slice_head(n = 15) %>%
+  ggplot(aes(x = reorder(NAME, change), y = change)) +
+  geom_col(fill = "red") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant decrease in 
+       median household income",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Absolute Change in Median Household Income")
+
+```
+
+To assess the reliability of our census tract data, we computed the coefficient of variation and flagged the reliability using the Jurjevich (2018) thresholds:
+
+- CV \<12% = reliable
+
+- CV 12-40% = somewhat reliable
+
+- CV \>40% = unreliable
+
+First, for the poverty rate in 2013-2017 and 2016-2017:
+
+```{r}
+library(gt)
+
+#Total: 5-year
+rel_table_pov17 <- pov_comp %>%
+  mutate(
+    cv = (share_moe_17 / 1.645) / share_17 * 100,
+    dot = case_when(
+      cv < 12  ~ "🟢",
+      cv <= 40 ~ "🟡",
+      TRUE     ~ "🔴"
+    ),
+    flag = case_when(
+      cv < 12  ~ "Reliable",
+      cv <= 40 ~ "Somewhat reliable",
+      TRUE     ~ "Unreliable"
+    ),
+    NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")
+  ) %>%
+  arrange(desc(cv))
+
+rel_table_pov17 %>%
+  select(dot, NAME, share_17, share_moe_17, cv, flag)  %>%
+  gt() %>%
+  fmt_number(columns = c(share_17, share_moe_17), decimals = 0) %>%
+  fmt_number(columns = cv, decimals = 1) %>%
+  cols_label(
+    dot      = "",
+    NAME     = "Tract",
+    share_17 = "Estimate",
+    share_moe_17      = "MOE",
+    cv       = "CV (%)",
+    flag     = "Reliability"
+  ) %>%
+  cols_align(align = "center", columns = dot) %>%
+  tab_header(
+    title    = "Percent population below poverty level",
+    subtitle = "Philadelphia Census Tracts, ACS 2013-2017 5-year estimates"
+  ) %>%
+  tab_source_note(
+    "Reliability thresholds follow Jurjevich et al. (2018): CV < 12% reliable, 12–40% somewhat reliable, > 40% unreliable."
+  )
+
+
+#White: 5-year
+white_rel_table_pov17 <- pov_comp %>%
+  mutate(
+    cv = (white_share_moe_17 / 1.645) / white_share_17 * 100,
+    dot = case_when(
+      cv < 12  ~ "🟢",
+      cv <= 40 ~ "🟡",
+      TRUE     ~ "🔴"
+    ),
+    flag = case_when(
+      cv < 12  ~ "Reliable",
+      cv <= 40 ~ "Somewhat reliable",
+      TRUE     ~ "Unreliable"
+    ),
+    NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")
+  ) %>%
+  arrange(desc(cv))
+
+white_rel_table_pov17 %>%
+  select(dot, NAME, white_share_17, white_share_moe_17, cv, flag) %>%
+  gt() %>%
+  fmt_number(columns = c(white_share_17, white_share_moe_17), decimals = 0) %>%
+  fmt_number(columns = cv, decimals = 1) %>%
+  cols_label(
+    dot      = "",
+    NAME     = "Tract",
+    white_share_17 = "Estimate",
+    white_share_moe_17      = "MOE",
+    cv       = "CV (%)",
+    flag     = "Reliability"
+  ) %>%
+  cols_align(align = "center", columns = dot) %>%
+  tab_header(
+    title    = "Percent population below poverty level",
+    subtitle = "Philadelphia Census Tracts, ACS 2013-2017 5-year estimates"
+  ) %>%
+  tab_source_note(
+    "Reliability thresholds follow Jurjevich et al. (2018): CV < 12% reliable, 12–40% somewhat reliable, > 40% unreliable."
+  )
+
+
+#White: 1-year
+white_rel_table_pov17_1yr <- white_pov_comp %>%
+  mutate(
+    cv = (white_share_moe_17 / 1.645) / white_share_17 * 100,
+    dot = case_when(
+      cv < 12  ~ "🟢",
+      cv <= 40 ~ "🟡",
+      TRUE     ~ "🔴"
+    ),
+    flag = case_when(
+      cv < 12  ~ "Reliable",
+      cv <= 40 ~ "Somewhat reliable",
+      TRUE     ~ "Unreliable"
+    ),
+    NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")
+  ) %>%
+  arrange(desc(cv))
+
+white_rel_table_pov17_1yr %>%
+  select(dot, NAME, white_share_17, white_share_moe_17, cv, flag) %>%
+  gt() %>%
+  fmt_number(columns = c(white_share_17, white_share_moe_17), decimals = 0) %>%
+  fmt_number(columns = cv, decimals = 1) %>%
+  cols_label(
+    dot      = "",
+    NAME     = "Tract",
+    white_share_17 = "Estimate",
+    white_share_moe_17      = "MOE",
+    cv       = "CV (%)",
+    flag     = "Reliability"
+  ) %>%
+  cols_align(align = "center", columns = dot) %>%
+  tab_header(
+    title    = "Percent population below poverty level",
+    subtitle = "Philadelphia Census Tracts, ACS 2016-2017 1-year estimates"
+  ) %>%
+  tab_source_note(
+    "Reliability thresholds follow Jurjevich et al. (2018): CV < 12% reliable, 12–40% somewhat reliable, > 40% unreliable."
+  )
+
+```
+
+Second, for the median household income for 2013-2017:
+
+```{r}
+
+rel_table_inc <- pov_comp %>%
+  mutate(
+    cv = (median_hh_inc_17M / 1.645) / median_hh_inc_17E * 100,
+    dot = case_when(
+      cv < 12  ~ "🟢",
+      cv <= 40 ~ "🟡",
+      TRUE     ~ "🔴"
+    ),
+    flag = case_when(
+      cv < 12  ~ "Reliable",
+      cv <= 40 ~ "Somewhat reliable",
+      TRUE     ~ "Unreliable"
+    ),
+    NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")
+  ) %>%
+  arrange(desc(cv))
+
+rel_table_inc %>%
+  select(dot, NAME, median_hh_inc_17E, median_hh_inc_17M, cv, flag) %>%
+  gt() %>%
+  fmt_number(columns = c(median_hh_inc_17E, median_hh_inc_17M), decimals = 0) %>%
+  fmt_number(columns = cv, decimals = 1) %>%
+  cols_label(
+    dot      = "",
+    NAME     = "Tract",
+    median_hh_inc_17E = "Estimate",
+    median_hh_inc_17M      = "MOE",
+    cv       = "CV (%)",
+    flag     = "Reliability"
+  ) %>%
+  cols_align(align = "center", columns = dot) %>%
+  tab_header(
+    title    = "Median Household Income",
+    subtitle = "Philadelphia Census Tracts, ACS 2016-2017 1-year estimates"
+  ) %>%
+  tab_source_note(
+    "Reliability thresholds follow Jurjevich et al. (2018): CV < 12% reliable, 12–40% somewhat reliable, > 40% unreliable."
+  )
+
+```
+
+#3 Adjudicating the Article
+
+The central claim of the article, that there is growing inequality, does not seem to have support. As the charts show below, when we look at the 50 census tracts with the (statistically significant) highest and lowest poverty rates, the highest poverty rate census tracts have actually decreased in rate and the lowest poverty rate census tracts have increased in poverty rate. In other words, the poorest tracts have become less poor and the wealthiest tracts have become less wealthy. The charts for highest and lowest median household income show a similar pattern; both the (statistically significant) poorest 25 and wealthiest 25 are overwhelmingly gaining in income (not adjusted for inflation).
+
+The exception is white poverty, which does seem to align with the article's claim, as (statistically significant) census tracts with high white poverty do seem to be increasing drastically (and with margin of error, perhaps even more) across the city.
+
+Note though that these analyses are limited as we did not take into consideration inflation or neighborhoods (as the article did not supply their methodology behind boundaries). The article also hypothesized potential reasons leading to an increase in white poverty, such as the recession and drugs, but offered no evidence to support this. A more detailed investigation that takes spatial statistics into account therefore seems warranted.
+
+```{r}
+#change in 25 census tracts with the highest poverty rate in 2010
+pov_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  arrange(desc(share_10)) %>%
+  slice_head(n = 25) %>%
+  ggplot(aes(x = reorder(NAME, share_10), y = change)) +
+  geom_col(fill = "red") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant change in 
+       poverty  among 25 highest poverty rate  census tracts",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Pct Point Change in percentage of people below poverty level")
+
+#change in 25 census tracts with the lowest poverty rate in 2010
+pov_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  arrange(share_10) %>%
+  slice_head(n = 25) %>%
+  ggplot(aes(x = reorder(NAME, share_10), y = change)) +
+  geom_col(fill = "blue") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant change in 
+       poverty among 25 lowest poverty rate  census tracts",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Pct Point Change in percentage of people below poverty level")
+
+#change in income among 25 census tracts with the lowest median household incomes in 2010
+inc_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  arrange(desc(median_hh_inc_10E)) %>%
+  slice_head(n = 25) %>%
+  ggplot(aes(x = reorder(NAME, median_hh_inc_10E), y = change)) +
+  geom_col(fill = "red") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant change 
+       in median household income among lowest 25 census tracts",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Absolute Change in Median Household Income")
+
+#change in income among 25 census tracts with the highest median household incomes in 2010
+inc_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  arrange(median_hh_inc_10E) %>%
+  slice_head(n = 25) %>%
+  ggplot(aes(x = reorder(NAME, median_hh_inc_10E), y = change)) +
+  geom_col(fill = "blue") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant change in 
+       median household income among highest 25 census tracts",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Absolute Change in Median Household Income")
+
+##change in 25 census tracts with the highest white poverty rate in 2010
+
+white_pov_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  arrange(desc(share_10)) %>%
+  slice_head(n = 25) %>%
+  ggplot(aes(x = reorder(NAME, share_10), y = change)) +
+  geom_col(fill = "red") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant change in 
+       white poverty  among 25 lowest median household income census tracts",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Pct Point Change in percentage of white people below poverty level")
+
+
+#change in 25 census tracts with the lowest white poverty rate in 2010
+pov_change %>%
+  filter(significant) %>% #just keeping the ones that are significant
+  mutate(NAME = str_remove(NAME.x, ", Philadelphia County, Pennsylvania")) %>%
+  arrange(share_10) %>%
+  slice_head(n = 25) %>%
+  ggplot(aes(x = reorder(NAME, share_10), y = change)) +
+  geom_col(fill = "blue") +
+  geom_errorbar(aes(ymin = change - moe_diff,
+                    ymax = change + moe_diff), width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Statistically significant change in 
+       white poverty  among 25 highest median household income census tracts",
+       subtitle = "2006–2010 vs 2013–2017, ACS 5-year estimates",
+       x = NULL, y = "Pct Point Change in percentage of white people below poverty level")
+
+```
+
+#4 Rewriting
+
+In dull and opaque detail, the new 2018 5-year ACS leaves most of its effects on Philadelphia relatively undetermined. Rigorous analysis revealed that only 20% of census tracts in the city allow for reporters to definitively understand whether poverty rates and incomes actually increased or decreased in them. Of those 20%, inequality seems to either be slowing down or reversing (possibly a sign of gentrification), and white poverty seems to be growing or shrinking across the city.

@@ -1,0 +1,36 @@
+---
+title: "Week 2: ggplot and MOE"
+description: "Plotting ahoy!"
+date: 2026-09-04
+---
+
+## What We Did
+
+<!-- CHANGE THIS: replace with your own notes -->
+
+A quiz, followed by....
+
+## Key Concepts
+
+The loop: **Edit → Save → Render → Commit → Push → wait → refresh**
+
+
+## Proving R Works
+
+The chunk below runs when this page renders. If you can see a result underneath it on your published site, R and Quarto are talking to each other correctly.
+
+```{r}
+sessionInfo()$R.version$version.string
+```
+
+## Reflection
+
+<!-- CHANGE THIS: 3-4 sentences -->
+
+
+## Questions I Still Have
+
+
+
+#One thing I learned
+
