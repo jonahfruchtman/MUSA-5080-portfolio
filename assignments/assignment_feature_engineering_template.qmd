@@ -13,6 +13,7 @@ execute:
 freeze: false
 ---
 
+In this report, we will be creating a Model to predict the percentage of households in Philadelphia who do not own a car. We first draw census data from the 2023 ACS, and then pull in spatial data from OpenDataPhilly to address spatial clustering concerns. Finally, we transform our features using logs, squares, and categories to capture non-linear trends. Through each step we assess and compare the CV RMSE to find the model with the lowest residuals.
 
 ## Part 0: Setup
 
