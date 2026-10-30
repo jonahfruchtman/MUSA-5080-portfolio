@@ -1,0 +1,787 @@
+---
+title: "Assignment 5: House Price Prediction, Chicago"
+subtitle: "MUSA 5080 · Team assignment"
+author: "Team ___: ___, ___, ___, ___"
+date: last-modified
+format:
+  html:
+    toc: true
+    code-fold: show
+execute:
+  warning: false
+  message: false
+---
+
+## The assignment
+
+In class we built a house price model for Philadelphia. Now your team does it for a city you haven't modeled: **Chicago**.
+
+The Cook County Assessor's Office has to value every home in the county, including the vast majority that didn't sell this year. Assessments drive property tax bills. When they're wrong in a systematic way, some households pay more than their share. A 2017 *Chicago Tribune* investigation, "The Tax Divide," found exactly that in Cook County: lower-value homes were assessed at higher shares of their worth than expensive ones.
+
+Build a model that predicts **single-family sale prices in Chicago, 2023–2025**, using only the tools from this course. The file contains **only features of the house itself**. Everything about location is yours to build.
+
+### A real test
+
+| File | What's in it |
+|---|---|
+| `chicago_train.csv` | About 80% of the houses, **with** sale prices |
+| `chicago_test.csv` | The other 20%, **without** sale prices. You predict them; we score you. |
+
+The test houses were held out by house, not by sale, so a house that sold twice is entirely on one side. Your CV RMSE is your estimate. Your test RMSE is the truth. **If they're far apart, something leaked.** 
+
+**Due:** Friday, October 30. All teammates renders the file on their portfolio and every member submits that link on Canvas. One teammate uploads `team_XX_predictions.csv`.
+
+**Individual accountability:** Q7 on October 30 asks each of you about *this* model: which features you used and why, your CV and test RMSE, and where the model fails worst. Make sure everyone can explain all of it.
+
+### Rules
+
+::: {.callout-important}
+## 1. Clean training rows once, in Part 1. Never drop test rows.
+You must predict every test house, so fill NAs in a feature rather than filtering.
+
+## 2. Stay inside the time window
+Open data from 2023–2025 only.
+
+## 3. No leakage
+Nothing built from sale prices. *Would the Assessor have this number for a house that didn't sell?*
+
+## 4. The outcome stays in dollars
+Transform predictors, not `sale_price`.
+
+## 5. No prices from the test fold or the future
+No features built from other houses' sale prices. 
+:::
+
+### Please include in your final rendered qmd for this assignment:
+
+| | |
+|---|---|
+| **Model log** | Every model you tried, in order, with CV RMSE and Moran's I. Each row has a note saying why you tried it. |
+| **Features** | Incorporate the feature engineering tricks - including the spatial ones covered these past few weeks. 
+| **Diagnostics** | Residual maps for your baseline and final model, and what changed. |
+| **Error analysis** | Where your final model fails worst, and whose homes it over-values (Part 4). |
+| **Reasoning** | Choices justified by evidence from your own analysis.
+
+---
+
+## Part 0: Setup (provided)
+
+These helpers are to help you get off the ground.
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(caret)
+library(spdep)
+library(nngeo)
+options(scipen = 999)
+```
+
+```{r}
+#| label: helpers
+check_na <- function(formula, df) {
+  vars <- all.vars(formula)
+  bad <- vars[sapply(vars, function(v) any(is.na(df[[v]])))]
+  if (length(bad) > 0) {
+    stop("These variables have NAs: ", paste(bad, collapse = ", "),
+         ". Fill them or choose another variable (Rule 1).")
+  }
+}
+
+# 10-fold CV RMSE, same folds every time
+cv_rmse <- function(formula, data) {
+  df <- if (inherits(data, "sf")) st_drop_geometry(data) else data
+  check_na(formula, df)
+  set.seed(5080)
+  fit <- train(formula, data = df, method = "lm",
+               trControl = trainControl(method = "cv", number = 10))
+  fit$results$RMSE
+}
+
+# Each house's prediction from the fold where it was held out
+cv_pred <- function(formula, data) {
+  df <- if (inherits(data, "sf")) st_drop_geometry(data) else data
+  check_na(formula, df)
+  set.seed(5080)
+  fit <- train(formula, data = df, method = "lm",
+               trControl = trainControl(method = "cv", number = 10,
+                                        savePredictions = "final"))
+  fit$pred %>% arrange(rowIndex) %>% pull(pred)
+}
+
+# Chicago Data Portal (Socrata) -> sf. `where` is a SoQL filter.
+socrata_get <- function(dataset, where, select = NULL, limit = 200000) {
+  where <- str_squish(where)
+  q <- paste0("$where=", URLencode(where, reserved = TRUE), "&$limit=", limit)
+  if (!is.null(select)) q <- paste0(q, "&$select=", URLencode(str_squish(select), reserved = TRUE))
+  url <- paste0("https://data.cityofchicago.org/resource/", dataset, ".geojson?", q)
+  tmp <- tempfile(fileext = ".geojson")
+  resp <- tryCatch(download.file(url, tmp, quiet = TRUE), error = function(e) e)
+  if (inherits(resp, "error")) stop("Portal request failed. Open this URL in a browser to see why:\n", url)
+  st_read(tmp, quiet = TRUE)
+}
+
+```
+
+### Load both files together (provided)
+
+Build every feature on `all_sales`, so training and test houses get identical features. Split off `train` again whenever you add something.
+
+```{r}
+#| label: load
+
+all_sales <- bind_rows(
+  read_csv("C:/Users/jonah/Documents/PPA/MUSA-5080-portfolio/data/chicago_train.csv", show_col_types = FALSE) %>% mutate(split = "train"),
+  read_csv("C:/Users/jonah/Documents/PPA/MUSA-5080-portfolio/data/chicago_test.csv",  show_col_types = FALSE) %>% mutate(split = "test")
+) %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+  st_transform(3435)            # Illinois East State Plane, feet
+
+all_sales %>% st_drop_geometry() %>% count(split)
+
+```
+
+Useful sources: the [Chicago Data Portal](https://data.cityofchicago.org) (find a dataset's ID under its API button), the Census via `tidycensus`, and Cook County's open data.
+
+---
+
+## Part 1: Clean and explore
+
+Decide which training sales are market sales. Record each rule, why, and how many it removed. Then explore: at least four plots, including a map of price.
+
+```{r}
+#| label: part-1
+
+#Mutate square footage to base (*1000) and lot size to square feet
+all_sales <- all_sales %>%
+  mutate(building_sf = building_000sf *1000,
+        lotsize_sqft = lotsize_acre * 53650) %>%
+  filter (sale_price < 11000000)
+
+
+#Plot sq ft vs sale price
+ggplot(all_sales, aes(x = building_sf, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+
+#Plot building age vs sale price
+ggplot(all_sales, aes(x = building_age, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+
+#Plot lot size vs sale price
+ggplot(all_sales, aes(x = lotsize_sqft, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+
+#Plot number of bedrooms vs sale price
+ggplot(all_sales, aes(x = num_bedrooms, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+#Need to categorize for model
+
+
+#Plot full baths vs sale price
+ggplot(all_sales, aes(x = num_full_baths, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+#Need to categorize for model
+
+
+#Plot half baths vs sale price
+ggplot(all_sales, aes(x = num_half_baths, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+#Need to categorize for model
+
+
+#Plot fire places vs sale price
+ggplot(all_sales, aes(x = num_fireplaces, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+#Need to categorize for model
+
+
+#Garage size vs sale price
+ggplot(all_sales, aes(x = garage_size, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+#Need to catergorize for model
+
+
+#Central air vs sale price
+ggplot(all_sales, aes(x = central_air, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+#Need to categorize for model
+
+
+#One story vs sale price
+ggplot(all_sales, aes(x = one_story, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+
+all_sales <- all_sales %>%
+  mutate(
+    price_category = cut(
+      sale_price,
+      breaks = c(0, 184500, 302950, Inf),
+      labels = c("low", "medium", "high")
+    )
+  )
+
+ggplot(all_sales) +
+  geom_sf(aes(color = price_category), alpha = 0.7, size = 0.2) +
+  theme_minimal()
+
+ggplot(all_sales, aes(x = building_000sf, y = sale_price)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  labs(
+    title = "Sale Price vs. Building Size",
+    x = "Building Size (thousand sq ft)",
+    y = "Sale Price ($)"
+  ) +
+  theme_minimal()
+
+
+ggplot(all_sales, aes(x = building_age, y = sale_price)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x + I(x^2),
+    se = TRUE,
+    color = "red"
+  ) +
+  labs(
+    title = "Sale Price vs. Building Age",
+    x = "Building Age (years)",
+    y = "Sale Price ($)"
+  ) +
+  theme_minimal()
+
+ggplot(all_sales, aes(x = building_age)) +
+  geom_histogram(binwidth = 10, fill = "steelblue", color = "white") +
+  labs(
+    title = "Distribution of Building Age",
+    x = "Building Age (years)",
+    y = "Number of Sales"
+  ) +
+  theme_minimal()
+
+ggplot(all_sales, aes(x = factor(num_bedrooms))) +
+  geom_bar(fill = "steelblue", color = "white") +
+  labs(
+    title = "Distribution of Bedroom Numbers",
+    x = "Number of Bedrooms",
+    y = "Number of Sales"
+  ) +
+  theme_minimal()
+
+ggplot(all_sales, aes(x = factor(num_fireplaces))) +
+  geom_bar(fill = "steelblue", color = "white") +
+  labs(
+    title = "Distribution of Number of Fireplace",
+    x = "Number of Fireplaces",
+    y = "Number of Sales"
+  ) +
+  theme_minimal()
+```
+
+**Answer:** What in your exploration shaped your modeling choices?
+
+*Your answer:*
+
+---
+
+## Part 2: Build the model
+
+Create Model Log
+```{r}
+#| label: log-start
+model_log <- tibble(
+  model   = character(),
+  added   = character(),
+  cv_rmse = numeric(),
+  notes   = character()
+)
+```
+
+Start with a structure-only baseline. Then add features in steps you can learn from, logging each one. Keep the log in a tibble with columns `model`, `added`, `cv_rmse`, `moran_i`, `notes`.
+
+# 2.1 Base Model
+
+```{r}
+#| label: part-2
+
+# Baseline Model - Structure-only, no transformations
+
+#Remove NAs
+all_sales <- all_sales %>%
+  filter(!is.na(lotsize_sqft),
+         !is.na(num_fireplaces)
+         # add !is.na() for each baseline predictor like in the in-class lab
+         )
+
+f1 <- sale_price ~ building_age + num_bedrooms + num_fireplaces + building_sf + lotsize_sqft
+
+m1 <- lm(f1, data = all_sales)
+summary(m1)
+
+model_log <- model_log %>%
+  add_row(model = "m1", added = "Baseline",
+          cv_rmse = cv_rmse(f1, all_sales),
+          notes = "baseline")
+
+model_log
+
+
+```
+
+# 2.2 Where is the Baseline wrong?
+
+```{r}
+all_sales <- all_sales %>% mutate(resid_m1 = residuals(m1))
+
+ggplot(all_sales) +
+  geom_sf(aes(fill = resid_m1), color = NA) +
+  scale_fill_gradient2(low = "#2166ac", mid = "grey95", high = "#b2182b", midpoint = 0) +
+  theme_void() +
+  labs(title = "Baseline model: where it's wrong",
+       subtitle = "Red = actual higher than predicted",
+       fill = "Residual")
+
+
+```
+# 2.3 Transform Baseline
+```{r}
+#| label:
+
+## LOT SIZE  
+# Log Lot Size SF
+all_sales <- all_sales %>% 
+  mutate(log_lotsize_sqft = log1p(lotsize_sqft))
+
+# Plot Logged Lot Size SF
+ggplot(all_sales, aes(x = log_lotsize_sqft)) + geom_histogram(bins = 30) + theme_minimal()
+
+## BUILDING AGE
+# Square Building Age
+all_sales <- all_sales %>% 
+  mutate(sq_blg_age = (I(building_age)^2 + building_age))
+
+# Plot Squared Building Age
+ggplot(all_sales, aes(x = building_age, y = sale_price)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x + I(x^2),
+    se = TRUE,
+    color = "red"
+  ) +
+  labs(
+    title = "Sale Price vs. Building Age",
+    x = "Building Age (years)",
+    y = "Sale Price ($)"
+  ) +
+  theme_minimal()
+
+## NUMBER OF BEDROOMS
+#Categorize Number of Bedrooms
+all_sales <- all_sales %>%
+  mutate(
+    Cat_bedroom_num = case_when(
+      num_bedrooms <= 2 ~ "1-2 bedrooms",
+      num_bedrooms == 3 ~ "3 bedrooms",
+      num_bedrooms >= 4 & num_bedrooms <= 5 ~ "4-5 bedrooms",
+      num_bedrooms >= 6 ~ "6+ bedrooms",
+      TRUE ~ NA_character_
+    ),
+    Cat_bedroom_num = factor(
+      Cat_bedroom_num,
+      levels = c(
+        "1-2 bedrooms",
+        "3 bedrooms",
+        "4-5 bedrooms",
+        "6+ bedrooms"
+      )
+    )
+  )
+
+#Plot Categorized Number of Bedrooms
+ggplot(all_sales, aes(x = factor(Cat_bedroom_num))) +
+  geom_bar(fill = "steelblue", color = "white") +
+  labs(
+    title = "Distribution of Number of Bedrooms",
+    x = "Number of Fireplaces",
+    y = "Number of Sales"
+  ) +
+  theme_minimal()
+
+## NUMBER OF FIREPLACES
+
+#Categorize Number of Fireplaces
+all_sales <- all_sales %>%
+  mutate(
+    Cat_fireplaces_num = case_when(
+      num_fireplaces < 1 ~ "0 fireplaces",
+      num_fireplaces == 1 ~ "1 fireplace",
+      num_fireplaces > 1 ~ "2+ fireplaces",
+      TRUE ~ NA_character_
+    ),
+    Cat_fireplaces_num = factor(
+      Cat_fireplaces_num,
+      levels = c(
+        "0 fireplaces",
+        "1 fireplace",
+        "2+ fireplaces"
+      )
+    )
+  )
+
+#Plot Categorized Number of Fireplaces
+ggplot(all_sales, aes(x = factor(Cat_fireplaces_num))) +
+  geom_bar(fill = "steelblue", color = "white") +
+  labs(
+    title = "Distribution of Number of Fireplace",
+    x = "Number of Fireplaces",
+    y = "Number of Sales"
+  ) +
+  theme_minimal()
+
+```
+# 2.4 Model 2: Transformed Baseline
+
+```{r}
+#| label: Transformed Baseline
+
+f2 <- sale_price ~ I(building_age)^2 + building_age + Cat_bedroom_num + Cat_fireplaces_num + building_sf + log_lotsize_sqft
+
+m2 <- lm(f2, data = all_sales)
+summary(m2)
+
+model_log <- model_log %>%
+  add_row(model = "m2", added = "Transformed Baseline",
+          cv_rmse = cv_rmse(f2, all_sales),
+          notes = "transformed baseline")
+
+model_log
+
+
+```
+#2.5 Load Demographic Variables
+
+```{r}
+#| label: Demographic Variables
+
+vars <- load_variables(2024, "acs5")
+
+chicago_tracts <- get_acs(
+  geography = "tract",
+  state = "IL",
+  county = "Cook",
+  variables = c(                 # universe #
+    total_pop = "B01003_001",    # people
+    totalHH = "B08201_001",      # households
+    medinc = "B07011_001",       # people
+    adult_18_64 = "C18108_006",  # people
+    edu_total  = "B15003_001",   # people >25yrs
+    ba         = "B15003_022",   # people >25yrs
+    ma         = "B15003_023",   # people >25yrs
+    prof       = "B15003_024",   # people >25yrs
+    phd        = "B15003_025"    # people >25yrs
+  ),
+    year = 2024,
+  output = "wide",
+  geometry = TRUE
+) %>%
+  st_transform(3435)
+```
+
+# 2.6 Transform Variables, remove NULL and no population tracts, and join to main data
+```{r}
+#| label: Demographic Variables
+
+#Transform
+chicago_tracts <- chicago_tracts %>%
+  mutate(
+    pct_18to64 = adult_18_64E / total_popE * 100,
+    pct_ba     = (baE + maE + profE + phdE) / edu_totalE * 100
+    )
+
+#Remove population is 0
+chicago_tracts <- chicago_tracts %>%
+  filter(total_popE > 0,
+         !is.na(medincE),
+         !is.na(pct_18to64),
+         !is.na(pct_ba))
+
+#Spatially Join Demographic Data
+all_sales <- st_join(
+  all_sales,
+  chicago_tracts,
+  join = st_within,
+  left = TRUE
+) %>% 
+  filter(total_popE > 0,
+         !is.na(medincE),
+         !is.na(pct_18to64),
+         !is.na(pct_ba))
+
+  
+```
+
+# 2.7 Visualize Data
+
+```{r}
+#| label:
+
+#Median Income  
+ggplot(all_sales, aes(x = medincE, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#Percent 18-64
+ggplot(all_sales, aes(x = pct_18to64, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#Percent BA
+ggplot(all_sales, aes(x = pct_ba, y = sale_price)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#Percent BA Sqaures
+ggplot(all_sales, aes(x = pct_ba, y = sale_price)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x + I(x^2),
+    se = TRUE,
+    color = "red"
+  ) +
+  labs(
+    title = "Sale Price vs. Building Age",
+    x = "Building Age (years)",
+    y = "Sale Price ($)"
+  ) +
+  theme_minimal()
+```
+# 2.8 Model 3: Demographic and Transformed Baseline
+```{r}
+#| label: Model 3
+
+f3 <- sale_price ~ year + I(building_age)^2 + building_age + Cat_bedroom_num + Cat_fireplaces_num + building_sf + log_lotsize_sqft + medincE + pct_18to64 + I(pct_ba)^2 + pct_ba
+
+m3 <- lm(f3, data = all_sales)
+summary(m3)
+
+model_log <- model_log %>%
+  add_row(model = "m3", added = "Demographic Info",
+          cv_rmse = cv_rmse(f3, all_sales),
+          notes = "Demographic Info")
+
+model_log
+
+```
+
+# 2.9 Load Spatial Data
+
+```{r}
+#| label: part-3
+
+## Amenities
+
+# Groceries
+groceries <- st_read("C:/Users/jonah/Documents/PPA/MUSA-5080-portfolio/data/Grocery Store Status - Historical_20261025/geo_export_4dac3a47-0e82-444a-a97e-1471f51db7b2.shp") %>%
+    st_transform(st_crs(all_sales))
+
+#Bike share stations
+bike_stations <- st_read("https://data.cityofchicago.org/api/v3/views/bbyy-e7gq/query.geojson") %>%
+    st_transform(st_crs(all_sales))
+
+## Educational
+
+# School Attendance
+#https://data.cityofchicago.org/Education/Chicago-Public-Schools-School-Progress-Reports-SY2/twrw-chuq/about_data
+school_grade <- st_read("https://data.cityofchicago.org/api/v3/views/twrw-chuq/query.geojson") %>%
+    st_transform(st_crs(all_sales))
+
+school_attendance <- school_grade %>%
+  filter(school_type == "Neighborhood") %>%
+  select(c(school_id, long_name, school_type, student_attendance_year_1, geometry))
+
+
+## Risks
+
+# Crime
+crime_2023 <- read.csv("C:/Users/jonah/Documents/PPA/MUSA-5080-portfolio/data/chicago_crime_2023_coordinates.csv")
+
+#Flooding
+flood <- st_read(
+  "C:/Users/jonah/Documents/PPA/MUSA-5080-portfolio/data/floodzone/floodzone.shp"
+) %>%
+    st_transform(st_crs(all_sales))
+
+#tried using crashes but it crashes R
+#crashes <- st_read("https://data.cityofchicago.org/api/v3/views/85ca-t3if/query.json")
+
+
+```
+# 2.10 Model 3: Spatial Data
+
+```{r}
+#| label: 
+
+#Groceries - Nearest Distance
+chicago_tract_pts <- st_point_on_surface(all_sales)   # always inside the tract, unlike a centroid
+
+nearest_idx <- st_nearest_feature(chicago_tract_pts, groceries)
+
+all_sales <- all_sales %>%
+  mutate(groceries = as.numeric(
+    st_distance(chicago_tract_pts, groceries[nearest_idx, ], by_element = TRUE)) / 5280)
+
+
+f4 <- sale_price ~ year + I(building_age)^2 + building_age + Cat_bedroom_num + Cat_fireplaces_num + building_sf + log_lotsize_sqft + medincE + pct_18to64 + I(pct_ba)^2 + pct_ba + groceries
+
+m4 <- lm(f4, data = all_sales)
+summary(m4)
+
+model_log <- model_log %>%
+  add_row(model = "m4", added = "Plus Distance to groceries",
+          cv_rmse = cv_rmse(f4, all_sales),
+          notes = "Demographic Info")
+
+model_log
+
+
+# Bike Share: Number of bike share stations within 1/4 mile and avg distance to nearest 5 stations
+all_sales <- all_sales %>%
+  mutate(
+    bike_0.25mile = lengths(st_intersects(st_buffer(.,1320), bike_stations)),
+    bike_knn5  = sapply(st_nn(., bike_stations, k = 5, returnDist = TRUE,
+                                 progress = FALSE)$dist, mean)
+  )
+
+
+#School attendance -- NOT SURE HOW TO DO
+school_attendance <- school_attendance %>%
+  mutate(
+    Cat_attendance = case_when(
+      student_attendance_year_1 <= 50 ~ "1-2 bedrooms",
+      num_bedrooms == 3 ~ "3 bedrooms",
+      num_bedrooms >= 4 & num_bedrooms <= 5 ~ "4-5 bedrooms",
+      num_bedrooms >= 6 ~ "6+ bedrooms",
+      TRUE ~ NA_character_
+    ),
+    Cat_bedroom_num = factor(
+      Cat_bedroom_num,
+      levels = c(
+        "1-2 bedrooms",
+        "3 bedrooms",
+        "4-5 bedrooms",
+        "6+ bedrooms"
+      )
+    )
+  )
+
+# Crimes - Number within 1/4 mile and avg distance to nearest 5 crimes
+all_sales <- all_sales %>%
+  mutate(
+    crime_0.25mile = lengths(st_intersects(st_buffer(.,1320), bike_stations)),
+    crime_knn5  = sapply(st_nn(., bike_stations, k = 5, returnDist = TRUE,
+                                 progress = FALSE)$dist, mean)
+  )
+
+f5 <- sale_price ~ year + I(building_age)^2 + building_age + Cat_bedroom_num + Cat_fireplaces_num + building_sf + log_lotsize_sqft + medincE + pct_18to64 + I(pct_ba)^2 + pct_ba + groceries + crime_0.25mile
+
+m5 <- lm(f5, data = all_sales)
+summary(m5)
+
+model_log <- model_log %>%
+  add_row(model = "m5", added = "Plus Distance to crimes",
+          cv_rmse = cv_rmse(f5, all_sales),
+          notes = "Demographic Info")
+
+model_log
+
+
+
+# Flooding
+all_sales <- st_join(
+  all_sales,
+  flood %>% select(FLD_ZONE),
+  join = st_intersects,
+  left = TRUE
+)
+
+sort(unique(all_sales$FLD_ZONE))
+all_sales$FLD_ZONE <- as.factor(all_sales$FLD_ZONE)
+
+
+
+
+
+
+```
+
+---
+
+## Part 3: Final model
+
+Show your final model, the model log, and baseline vs. final residual maps.
+
+```{r}
+#| label: part-3
+```
+
+**Answer:** What helped most, and what disappointed you? Use your log.
+
+*Your answer:*
+
+---
+
+## Part 4: Where it fails, and who pays
+
+**4A.** Where does your final model fail worst? Is it guessing too high or too low there, and why do you think so?
+
+**4B.** Assessors judge their work with the **ratio** of predicted value to sale price. A ratio above 1 means the home is over-valued and its owner over-taxed. Does your model's ratio differ by neighborhood income? Connect your answer to your Part 1 cleaning rules and to "The Tax Divide."
+
+```{r}
+#| label: part-4
+```
+
+*Your answers:*
+
+---
+
+## Part 5: Predict the test houses (provided)
+
+Refit your final recipe on all training sales, then predict every test house. Set `f_final` to your final formula.
+
+```{r}
+#| label: predict-test
+m_final <- lm(f_final, data = st_drop_geometry(train))
+
+test <- all_sales %>% filter(split == "test")
+check_na(f_final, st_drop_geometry(test))       # fill NAs; never drop test rows
+
+preds <- tibble(id = test$id, pred = predict(m_final, st_drop_geometry(test)))
+
+stopifnot(nrow(preds) == nrow(test), all(is.finite(preds$pred)))
+write_csv(preds, "team_XX_predictions.csv")     # replace XX with your team number
+```
+
+**Final CV RMSE:** ___ . When your test RMSE comes back, you'll explain the gap on Q7.
+
+---
+
+## Part 6: Reflection (about 300 words, as a team)
+
+1. **Read one coefficient twice:** once as β̂, once for what it does to ŷ.
+2. **Would you hand this model to the Assessor?** What would you warn them about?
+
+*Your answer:*
+
+### Who did what
+
+| Name | Main contribution |
+|---|---|
+| | |
+
+### AI Team Statement
+What was your team's AI policy and how was AI used in this assignment? 

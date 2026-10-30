@@ -1,0 +1,344 @@
+---
+title: "Where Is the Model Wrong?"
+subtitle: "Week 7 · Spatial autocorrelation in errors · Price Prediction Competition!"
+author: "Dr. Elizabeth Delmelle"
+date: 2026-10-16
+format:
+  revealjs:
+    smaller: true
+    slide-number: c/t
+    chalkboard: true
+    code-line-numbers: false
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(tidyverse)
+library(sf)
+library(spdep)
+library(nngeo)
+options(scipen = 999)
+
+carto_get <- function(sql) {
+  url <- paste0("https://phl.carto.com/api/v2/sql?format=GeoJSON&q=", URLencode(sql))
+  st_read(url, quiet = TRUE)
+}
+```
+
+
+# Worked example
+
+## Reading a logged predictor
+
+From the Oct 9 lecture: tract rent on log of median income.
+
+$$\widehat{\text{rent}} = \beta_0 + 210 \cdot \log(\text{income})$$
+
+- β̂ reading: a **1% increase** in income goes with about **210 / 100 = $2.10** more rent.
+- ŷ reading: it lets the model bend, so it doesn't over-predict rent in the richest tracts.
+
+::: {.callout-tip}
+## The rule
+Log X, keep Y in dollars: β / 100 = change in Y for a 1% change in X.
+:::
+
+## The fold that broke
+
+```
+Error: factor district has new levels Upper Far Northeast
+```
+
+- One small district had all of its tracts in the test fold.
+- So the model was trained without ever seeing that level, and it can't predict it.
+- **Fix:** merge small groups *before* cross-validation.
+
+Today the same problem comes back with **neighborhoods**: about 150 of them, and some have only a handful of sales.
+
+# From tracts to houses
+
+## Same tools - new unit & shape
+
+| | Previous assignment | House Price Prediction |
+|---|---|---|
+| Unit | Census tract (polygon) | Single sale (point) |
+| n | ~400 | ~20,000 |
+| Count | crimes **in** the tract | crimes **within 660 ft** of the house |
+| Nearest | distance to nearest station | mean distance to the **5 nearest** |
+| Place | distance to City Hall | same |
+
+Nothing here is new. A buffer is just a polygon you draw yourself.
+
+## The sales
+
+```{r}
+#| label: sales
+sales <- carto_get(
+  "SELECT the_geom, parcel_number, sale_price, sale_date, total_livable_area,
+          number_of_bedrooms, number_of_bathrooms, year_built, interior_condition
+   FROM opa_properties_public
+   WHERE category_code = '1'
+     AND sale_date >= '2023-01-01' AND sale_date < '2025-01-01'"
+) %>%
+  st_transform(2272)
+
+nrow(sales)
+summary(sales$sale_price)
+```
+
+## Not every sale is a sale
+
+```{r}
+#| label: dollar-sales
+sales %>% st_drop_geometry() %>%
+  count(price_band = cut(sale_price, c(-Inf, 1000, 10000, 50000, Inf),
+                         labels = c("< $1k", "$1k–10k", "$10k–50k", "$50k+")))
+```
+
+$1 transfers between family members, sheriff sales, and LLC shuffles are recorded too. **Deciding what counts as a market sale is a modeling decision.** Write it down.
+
+```{r}
+#| label: clean
+sales <- sales %>%
+  filter(sale_price >= 10000, total_livable_area > 0, !st_is_empty(.)) %>%
+  mutate(year_built = na_if(as.numeric(year_built), 0),   # "0" means unknown
+         age = 2024 - year_built) %>%
+  filter(!is.na(age), !is.na(number_of_bathrooms))
+
+nrow(sales)
+```
+
+## Buffer count and kNN distance
+
+```{r}
+#| label: features
+violent <- carto_get(
+  "SELECT the_geom FROM incidents_part1_part2
+   WHERE dispatch_date >= '2023-01-01' AND dispatch_date < '2025-01-01'
+     AND text_general_code IN ('Aggravated Assault Firearm', 'Aggravated Assault No Firearm',
+                               'Robbery Firearm', 'Robbery No Firearm')"
+) %>%
+  filter(!st_is_empty(.)) %>%
+  st_transform(2272)
+
+sales <- sales %>%
+  mutate(
+    violent_660ft = lengths(st_intersects(st_buffer(., 660), violent)),
+    violent_knn5  = sapply(st_nn(., violent, k = 5, returnDist = TRUE,
+                                 progress = FALSE)$dist, mean)
+  )
+```
+
+Which is better? Count is zero for a lot of houses, while kNN is never zero. Try both and **let CV RMSE decide.**
+
+# Where is the model wrong?
+
+## A model, and its errors
+
+```{r}
+#| label: model
+m1 <- lm(sale_price ~ total_livable_area + number_of_bathrooms + age +
+           violent_knn5, data = sales)
+
+sales <- sales %>%
+  mutate(pred  = predict(m1, sales),
+         resid = sale_price - pred)      # + means the model guessed too LOW
+```
+
+::: {.callout-important}
+## Sign convention, all semester
+residual = actual − predicted. **Red = actual higher than predicted** (we under-predicted).
+:::
+
+## Map the errors
+
+```{r}
+#| label: resid-map
+#| fig-height: 6
+ggplot(sales) +
+  geom_sf(aes(color = resid), size = 0.4, alpha = 0.6) +
+  scale_color_gradient2(low = "#2166ac", mid = "grey90", high = "#b2182b",
+                        midpoint = 0, limits = c(-300000, 300000), oob = scales::squish) +
+  theme_void() +
+  labs(color = "Residual ($)", title = "Where the model is wrong")
+```
+
+Points overlap; `alpha` and `squish` stop a few huge misses from washing out the map.
+
+## You already did this by eye
+
+In the Week 5 lab and the gap assignment, you compared residual maps before and after adding features.
+
+Today we put **a number** on "do the errors cluster?"
+
+> Tobler: near things are more related than distant things.
+>
+> **If near houses have related errors, the model is missing something about place.**
+
+## The spatial lag: my neighbors' average
+
+```{r}
+#| label: weights
+coords <- st_coordinates(sales)
+w_knn  <- nb2listw(knn2nb(knearneigh(coords, k = 5)), style = "W")
+
+sales$resid_lag <- lag.listw(w_knn, sales$resid)
+```
+
+Each house gets the **average residual of its 5 nearest neighbors**.
+
+## Me vs. my neighbors
+
+```{r}
+#| label: moran-scatter
+#| fig-height: 5
+ggplot(sales, aes(resid, resid_lag)) +
+  geom_point(alpha = 0.15, size = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "#b2182b") +
+  coord_cartesian(xlim = c(-3e5, 3e5), ylim = c(-2e5, 2e5)) +
+  labs(x = "My residual", y = "Average of my 5 neighbors' residuals")
+```
+
+The slope of this line **is** Moran's I (with row-standardized weights).
+
+## Moran's I: the scary formula
+
+$$I = \frac{n}{\sum_i \sum_j w_{ij}} \cdot \frac{\sum_i \sum_j w_{ij}(x_i - \bar{x})(x_j - \bar{x})}{\sum_i (x_i - \bar{x})^2}$$
+
+It's asking one question:
+
+> **When I'm above average, are my neighbors above average too?**
+
+## Five houses on a block
+
+Neighbors are the houses next door.
+
+| House | Residual | − mean (+16k) | Deviation |
+|---|---|---|---|
+| A | +100k | | +84 |
+| B | +80k | | +64 |
+| C | +20k | | +4 |
+| D | −50k | | −66 |
+| E | −70k | | −86 |
+
+Positive residual means we **under**-predicted that house.
+
+## Multiply neighbors
+
+| Pair | Product | |
+|---|---|---|
+| A–B | (+84)(+64) = **+5,376** | both under-predicted |
+| B–C | (+64)(+4) = **+256** | |
+| C–D | (+4)(−66) = **−264** | different signs |
+| D–E | (−66)(−86) = **+5,676** | both over-predicted |
+
+Each pair counts twice (A→B and B→A): sum = 2 × 11,044 = **22,088**
+
+Σ deviation² = 7,056 + 4,096 + 16 + 4,356 + 7,396 = **22,920**
+
+$$I = \frac{5}{8} \cdot \frac{22{,}088}{22{,}920} \approx \mathbf{0.60}$$
+
+Strong clustering: the under-predictions sit together, and so do the over-predictions.
+
+## Reading Moran's I
+
+| I | Pattern | For our errors |
+|---|---|---|
+| near +1 | similar values cluster | the model is missing something about place |
+| near 0 | no spatial pattern | the errors look like noise in space |
+| below 0 | neighbors differ | rare for errors; check your weights |
+
+## Is that big? Shuffle and see
+
+```{r}
+#| label: moran-mc
+mc <- moran.mc(sales$resid, w_knn, nsim = 499)
+mc$statistic
+mc$p.value
+```
+
+`moran.mc` shuffles the residuals across houses 499 times. If the real I beats almost all the shuffles, the clustering isn't luck.
+
+::: {.callout-note}
+## p-value warning, again
+With 20,000 houses, nearly everything is "significant." **Watch the size of I fall as you add features.** That's the diagnostic.
+:::
+
+## Clustered errors are a feature you haven't built yet
+
+If Moran's I is high, ask **what's true about those places** that the model doesn't know:
+
+- An amenity or disamenity you haven't measured → **spatial feature**
+- Something about the whole neighborhood → **neighborhood fixed effect**
+- A relationship that differs by place → **interaction**
+
+Then refit, recompute I, and log both numbers.
+
+## "My spatial stats class says use a spatial lag model"
+
+$$y = \rho W y + X\beta + \varepsilon$$
+
+That's the right tool for *inference about spillovers*. For **prediction** it fails three ways:
+
+1. **It needs neighbors' prices.** To price a house, you'd need the prices of houses that haven't sold yet.
+2. **It leaks.** In CV, a test house's neighbors in the training set carry its answer.
+3. **It explains nothing.** "Near expensive houses" is not a reason a policymaker can act on.
+
+**Our rule: spatial features of X, never Y.** Crime near the house is fine; prices near the house are not.
+
+
+# A4: House Price Prediction, Chicago
+
+## Same workflow, new city
+
+Today you watched it on Philadelphia. Now your team does it on **Chicago**.
+
+The Cook County Assessor has to value every home, including the vast majority that didn't sell. The *Tribune*'s "The Tax Divide" (2017) found those assessments were regressive: cheaper homes were over-valued relative to expensive ones.
+
+- **~23,000 single-family sales**, 2023–2025: **features of the house only**. Every location feature is yours to build.
+- **Teams of 4**, one submission
+- **Due:** Friday, Oct 30
+- **Outcome stays in dollars.**
+
+## This time there's a real test
+
+| File | |
+|---|---|
+| `chicago_train.csv` | ~80% of houses, **with** prices |
+| `chicago_test.csv` | ~20% of houses, **no** prices |
+
+You submit predictions for the test houses. **We** compute the RMSE.
+
+- Your CV RMSE is your estimate. The test RMSE is the truth.
+- **If they're far apart, something leaked.**
+
+## What you turn in
+
+1. A rendered `.qmd` on **one teammate's portfolio**, linked on Canvas by every member
+2. `team_XX_predictions.csv` for the test houses
+3. A **model log**: every model, with CV RMSE *and* Moran's I
+4. **Where your model fails worst**, and whose homes it over-values
+
+## How you're accountable as an individual
+
+**Q7 (Oct 30)** asks about **your team's own model**:
+
+- Which features did you use, and why?
+- Your CV RMSE and your test RMSE: why are they different?
+- Where did it fail worst?
+
+Everyone needs to be able to answer. Split the work, then **teach each other.**
+
+## Goals for Before you leave today
+
+- [ ] Both files loaded, converted to points, projected to EPSG 3435
+- [ ] Cleaning rules for the **training** sales, with drop counts
+- [ ] Baseline in the log (CV RMSE)
+- [ ] First residual map and first Moran's I
+
+

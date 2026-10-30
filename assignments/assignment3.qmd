@@ -28,7 +28,7 @@ These results are alarming and disturbing. They also need to be subject to furth
 
 This report will therefore attempt to fill in these gaps on the census tract level so that we can better track where percent poverty and median household income has changed throughout the city – both in total and by race – so that we can better plan for future allocation of city resources to the most vulnerable regions.
 
----
+------------------------------------------------------------------------
 
 ##1 Locating our Data
 
