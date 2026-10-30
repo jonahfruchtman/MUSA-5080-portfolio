@@ -1,0 +1,765 @@
+---
+title: "Assignment 4: Building Features, Watching What Happens"
+subtitle: "MUSA 5080 · Integrates Weeks 1–5 · Due Friday, October 16"
+author: "Jonah Fruchtman"
+format:
+  html:
+    toc: true
+    code-fold: show
+    code-tools: true
+execute:
+  warning: false
+  message: false
+freeze: false
+---
+
+In this report, we will be creating a Model to predict the percentage of households in Philadelphia who do not own a car. We first draw census data from the 2023 ACS, and then pull in spatial data from OpenDataPhilly to address spatial clustering concerns. Finally, we transform our features using logs, squares, and categories to capture non-linear trends. Through each step we assess and compare the CV RMSE to find the model with the lowest residuals.
+
+## Part 0: Setup
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(caret)
+
+Sys.getenv("CENSUS_API_KEY") != ""   # should print TRUE
+```
+
+### The cross-validation helper
+
+This function runs 10-fold cross-validation with the same seed every time, so every model in the log is tested on the same folds.
+
+```{r}
+#| label: cv-helper
+ctrl <- trainControl(method = "cv", number = 10)
+
+cv_rmse <- function(formula, data) {
+  df <- if (inherits(data, "sf")) st_drop_geometry(data) else data
+  vars <- all.vars(formula)
+  bad <- vars[sapply(vars, function(v) any(is.na(df[[v]])))]
+  if (length(bad) > 0) {
+    stop("These variables have NAs: ", paste(bad, collapse = ", "),
+         ". Fill them or choose another variable (Rule 1: don't drop rows).")
+  }
+  set.seed(5080)
+  fit <- train(formula, data = df, method = "lm", trControl = ctrl)
+  fit$results$RMSE
+}
+```
+
+### The model log
+
+Every time we create a new model, we add a row.
+
+```{r}
+#| label: log-start
+model_log <- tibble(
+  model   = character(),
+  added   = character(),
+  cv_rmse = numeric(),
+  notes   = character()
+)
+```
+
+---
+
+## Part 1: Choose outcome
+
+
+### 1A: Pull outcome and baseline predictors
+
+Choose **three to five ACS predictors** for your baseline model. They should be things that plausibly relate to your outcome, but **none of them may be built from your outcome** (Rule 3).
+
+```{r}
+#| label: pull
+
+vars <- load_variables(2023, "acs5")
+
+philly_tracts <- get_acs(
+  geography = "tract",
+  state = "PA",
+  county = "Philadelphia",
+  variables = c(                 # universe #
+    total_pop = "B01003_001",    # people
+    # your outcome's numerator and denominator (or median), e.g.:
+    no_veh = "B08201_002",       # households
+    # your baseline predictors, e.g.:
+    totalHH = "B08201_001",      # households
+    medinc = "B07011_001",       # people
+    under18 = "C18108_002",      # people
+    under64 = "C18108_006",      # people
+    over65 = "C18108_010",       # people
+    familyHH =  "B11001_002",    # households
+    aloneHH = "B11001_008",      # households
+    occ_units  = "B25003_001",   # housing units   
+    renter_occ = "B25003_003",   # housing units
+    edu_total  = "B15003_001",   # people >25yrs
+    ba         = "B15003_022",   # people >25yrs
+    ma         = "B15003_023",   # people >25yrs
+    prof       = "B15003_024",   # people >25yrs
+    phd        = "B15003_025"   # people >25yrs
+  ),
+  year = 2023,
+  output = "wide",
+  geometry = TRUE
+) %>%
+  st_transform(2272)
+
+```
+
+```{r}
+#| label: build-outcome
+philly_tracts <- philly_tracts %>%
+  mutate(
+    # build your outcome, e.g. a percentage:
+    y = no_vehE / totalHHE * 100,
+    # and its reliability. For a percentage, use tidycensus::moe_prop();
+    # for a median or count, use the E and M columns directly.
+    y_moe = moe_prop(no_vehE, totalHHE,
+                           no_vehM, totalHHM),
+    y_se    = y_moe / 1.645,
+    y_cv    = y_se / y * 100,    
+    # predictors:
+    pct_under18 = under18E / total_popE * 100,
+    pct_18to64 = under64E / total_popE * 100,
+    pct_over65 = over65E / total_popE * 100,
+    pct_familyHH = familyHHE / totalHHE * 100,
+    pct_aloneHH = aloneHHE / totalHHE * 100,
+    pct_renter = renter_occE / occ_unitsE * 100,
+    pct_ba     = (baE + maE + profE + phdE) / edu_totalE * 100  
+    )
+```
+
+### 1B: Is it reliable enough to model?
+
+Before we commit, we check three things.
+
+```{r}
+#| label: reliability
+# How many tracts have no value for your outcome?
+sum(is.na(philly_tracts$y))
+
+# How reliable is it?
+summary(philly_tracts$y_cv)
+
+philly_tracts %>%
+  mutate(reliability = case_when(
+    y_cv < 0.25  ~ "High",
+    y_cv <= 0.5 ~ "Moderate",
+    TRUE       ~ "Low"
+  )) %>%
+  st_drop_geometry() %>%
+  count(reliability)
+
+# What does the distribution of reliability look like?
+ggplot(philly_tracts, aes(x = y_cv)) +
+  geom_histogram(bins = 30) +
+  theme_minimal()
+
+# What does the distribution of results look like?
+ggplot(philly_tracts, aes(x = y)) +
+  geom_histogram(bins = 30) +
+  theme_minimal()
+```
+
+
+Using the traditional split of low (>40), moderate (12-40), and high (<12) reliability, 387 of our tracts have high reliability. When looking at the histogram of reliability, we can see why: our observations are extremely right-skewed, with the greatest density of reliability around 0-0.5. Using a traditional model to measure reliability is therefore not suitable, as we cannot create a more realistic framework for what observations would only have moderate or low reliability. Therefore, in order to capture low-moderate observations in a model, we opted to adjust the scale so that any observations below 0.25 CV are "high", 0.25-0.5 CV are "moderate" and above 0.5 are "low". This allowed for a more realistic spread of reliability: 212 observations are "high" , 159 are "moderate," and 37 are "low." Expanding our definition of unreliability is important as it will help us build a hierarchy of census tracts. Doing so will allow us to know the percentage of households in Philadelphia that do not own a car, so we can understand how to best serve them -- with either public transit options or local and walkable amenities. 
+
+
+### 1C: Decide which tracts to model
+
+Here we filter once, and never again. Every later step uses `tracts`.
+
+```{r}
+#| label: filter
+tracts <- philly_tracts %>%
+  filter(total_popE > 0,
+         !is.na(y)
+         # add !is.na() for each baseline predictor like in the in-class lab
+         )
+
+nrow(philly_tracts)
+nrow(tracts)
+```
+
+We lost 20 tract when filtering out estimated "no population" tracts. These are tracts such as the airport, stadium district, and parks, which contain little to no housing.
+
+---
+
+## Part 2: Baseline model
+
+### 2A: Look first
+
+We plot our outcome against each predictor before modeling.
+
+```{r}
+#| label: look
+# one scatterplot per predictor, e.g.:
+
+#Median income
+ggplot(tracts, aes(x = medincE, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#Percent under 18
+ggplot(tracts, aes(x = pct_under18, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#Pct 18-64
+ggplot(tracts, aes(x = pct_18to64, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#Pct 65+
+ggplot(tracts, aes(x = pct_over65, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#Pct Family HH
+ggplot(tracts, aes(x = pct_familyHH, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#Pct Living Alone
+ggplot(tracts, aes(x = pct_aloneHH, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#Pct Renter
+ggplot(tracts, aes(x = pct_renter, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#Pct BA
+ggplot(tracts, aes(x = pct_ba, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+
+```
+
+### 2B: Fit and log
+
+```{r}
+#| label: m1
+f1 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18
+
+m1 <- lm(f1, data = tracts)
+summary(m1)
+
+model_log <- model_log %>%
+  add_row(model = "m1", added = "ACS baseline",
+          cv_rmse = cv_rmse(f1, tracts),
+          notes = "baseline")
+
+model_log
+```
+
+
+On tracts it hasn't seen, the baseline model misses by about 12 percentage points
+
+### 2C: Where is the baseline wrong?
+
+
+```{r}
+#| label: resid-map-1
+tracts <- tracts %>% mutate(resid_m1 = residuals(m1))
+
+ggplot(tracts) +
+  geom_sf(aes(fill = resid_m1), color = NA) +
+  scale_fill_gradient2(low = "#2166ac", mid = "grey95", high = "#b2182b", midpoint = 0) +
+  theme_void() +
+  labs(title = "Baseline model: where it's wrong",
+       subtitle = "Red = actual higher than predicted",
+       fill = "Residual")
+```
+
+Our model seems to under-predict in Center City and the North and over-predict in the Northwest and Northeast. This could be since we did not account for alternative modes of transportation.
+
+First, Center City and its surrounding neighborhoods are the most well-serviced areas in the City (such as the Broad Street Line); on the other hand, the latter are the most car-dependent. We might therefore see less car usage in areas with highest density.To also account for areas with potentially low density, but high ridership, we can also look at ridership rates 
+
+Similarly, proximity to Indego stations may also give another viable option for transportation other than SEPTA. These are mostly concentrating in and around Center City and so we could expect usage of them to be associated with reduced car ownership.
+
+We could look at the density of intersections. Shorter blocks, such as those in Center City and South Philadelphia, could indicate an area being more walkable and therefore less likely to need to own a car. On the other hand, longer blocks, such as those in the periphery of the city, could pose a barrier to walking and therefore encourage car ownership.
+
+Finally, the ability to actually park a car -- tallied in the number of available parking permits -- could also be an unaccounted for factor.
+
+
+---
+
+## Part 3: Getting data from Philadelphia's open data portal
+
+Many of the city's datasets on [OpenDataPhilly](https://opendataphilly.org) are served through a **Carto SQL API**. You send a SQL query in a URL, and it sends back data. Ask for `format=GeoJSON` and `st_read()` reads the result directly, just like the Indego feed in Week 4.
+
+The pattern:
+
+```
+https://phl.carto.com/api/v2/sql?format=GeoJSON&q=SELECT ... FROM table_name WHERE ...
+```
+
+Three pieces of SQL we rely on:
+
+- `SELECT the_geom, column1, column2` chooses which columns come back. **Always include `the_geom`**, or you get no geometry.
+- `FROM table_name` chooses the dataset.
+- `WHERE ...` filters rows. **Filter in the query, not in R.** Some tables have millions of rows, and pulling everything will be slow or fail.
+
+
+```{r}
+#| label: carto-helper
+carto_get <- function(sql) {
+  url <- paste0("https://phl.carto.com/api/v2/sql?format=GeoJSON&q=", URLencode(sql))
+  st_read(url, quiet = TRUE)
+}
+```
+
+### Finding layers
+
+```{r}
+#| label: my-layers
+
+#Regional Rail Outbound and Weekday Ridership 2017-2024
+region_rail_ridership <- st_read("https://hub.arcgis.com/api/v3/datasets/281807e0099f461c8ae3db9ef4347970_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1") %>%
+  st_transform(st_crs(tracts)) %>%
+  filter(Service_Ty == "Weekday") %>%
+  filter(Direction == "Outbound") %>%
+  filter(Year < 2024)
+
+#SEPTA Stops
+septa_stops <- st_read("https://hub.arcgis.com/api/v3/datasets/b227f3ddbe3e47b4bcc7b7c65ef2cef6_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1") %>%
+  st_transform(st_crs(tracts))
+
+#Indego
+indego <- st_read("https://www.rideindego.com/stations/json/") %>%
+  st_transform(st_crs(tracts))
+
+#Intersections
+int <- st_read("https://hub.arcgis.com/api/v3/datasets/cc0e1bfe7a3d4814a0a0329c2650c62e_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1") %>%
+  st_transform(st_crs(tracts))
+
+#Parking Permits
+parking <- st_read("https://phl.carto.com/api/v2/sql?q=SELECT+*+FROM+residential_parking_permit_blocks&filename=residential_parking_permit_blocks&format=geojson&skipfields=cartodb_id") %>%
+  st_transform(st_crs(tracts))
+
+
+
+```
+
+
+We imported a few layers to address our concerns of missing attributes:
+
+1. Regional rail outbound, weekday stations to help predict ridership for peripheral census tracts that may actually be less car dependent than thought.
+2. SEPTA stops, to help potentially show that greater density of stops could contribute to not needing to own a car.
+3. Indego stations, to also help show that the greater density of Indego stations could also help lead to not needing to own a car.
+4. Intersections, as a proxy for walkability
+5. Parking permits, to show the potential obstructions to regularly using a car in a certain district.
+
+---
+
+## Part 4: Building spatial features
+
+
+We build spatial features from our own layers. After each one, we fit a model, cross-validate it, and log it.
+
+```{r}
+#| label: my-spatial
+
+
+# Model 2: Regional Rail Stations - Nearest Distance to Nearest Station
+tract_pts <- st_point_on_surface(tracts)   # always inside the tract, unlike a centroid
+
+nearest_idx <- st_nearest_feature(tract_pts, region_rail_ridership)
+
+tracts <- tracts %>%
+  mutate(dist_rail_mi = as.numeric(
+    st_distance(tract_pts, region_rail_ridership[nearest_idx, ], by_element = TRUE)) / 5280)
+
+f2 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + dist_rail_mi
+
+m2 <- lm(f2, data = tracts)
+summary(m2)
+
+
+model_log <- model_log %>%
+  add_row(model = "m2", added = "Nearest Rail Station",
+          cv_rmse = cv_rmse(f2, tracts),
+          notes = "m1 + Nearest Rail Station")
+
+# repeat for each feature
+model_log
+
+# Model 3: SEPTA stops - Nearest Distance to Nearest Stop
+tract_pts <- st_point_on_surface(tracts)   # always inside the tract, unlike a centroid
+
+nearest_idx <- st_nearest_feature(tract_pts, septa_stops)
+
+tracts <- tracts %>%
+  mutate(septa_stop_mi = as.numeric(
+    st_distance(tract_pts, septa_stops[nearest_idx, ], by_element = TRUE)) / 5280)
+
+f3 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + septa_stop_mi
+
+m3 <- lm(f3, data = tracts)
+summary(m3)
+
+
+model_log <- model_log %>%
+  add_row(model = "m3", added = "Nearest SEPTA Stop",
+          cv_rmse = cv_rmse(f3, tracts),
+          notes = "m1 + Nearest SEPTA Stop")
+
+# repeat for each feature
+model_log
+
+# Model 4: All previous + SEPTA stops
+f4 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + dist_rail_mi + septa_stop_mi
+
+m4 <- lm(f4, data = tracts)
+summary(m4)
+
+
+model_log <- model_log %>%
+  add_row(model = "m4", added = "Nearest SEPTA Stop",
+          cv_rmse = cv_rmse(f4, tracts),
+          notes = "All previous + SEPTA stops")
+
+# repeat for each feature
+model_log
+
+
+#Model 5: Indego Stations - Nearest Distance to Nearest Stop
+tract_pts <- st_point_on_surface(tracts)   # always inside the tract, unlike a centroid
+
+nearest_idx <- st_nearest_feature(tract_pts, indego)
+
+tracts <- tracts %>%
+  mutate(indego_mi = as.numeric(
+    st_distance(tract_pts, indego[nearest_idx, ], by_element = TRUE)) / 5280)
+
+f5 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + indego_mi
+
+m5 <- lm(f5, data = tracts)
+summary(m5)
+
+
+model_log <- model_log %>%
+  add_row(model = "m5", added = "Indego Stations",
+          cv_rmse = cv_rmse(f5, tracts),
+          notes = "m1 + Indego Stations")
+
+# repeat for each feature
+model_log
+
+# Model 6: All previous + Indego Stations
+tract_pts <- st_point_on_surface(tracts)   # always inside the tract, unlike a centroid
+
+nearest_idx <- st_nearest_feature(tract_pts, indego)
+
+tracts <- tracts %>%
+  mutate(indego_mi = as.numeric(
+    st_distance(tract_pts, indego[nearest_idx, ], by_element = TRUE)) / 5280)
+
+f6 <- y ~ medincE + pct_renter + pct_ba + dist_rail_mi + pct_aloneHH + pct_under18 + septa_stop_mi + indego_mi
+
+m6 <- lm(f6, data = tracts)
+summary(m6)
+
+
+model_log <- model_log %>%
+  add_row(model = "m6", added = "Indego Stations",
+          cv_rmse = cv_rmse(f6, tracts),
+          notes = "All previous + Indego Stations")
+
+# repeat for each feature
+model_log
+
+
+# Model 7: Density of intersections
+tracts <- tracts %>%
+  mutate(n_int = lengths(st_intersects(., int)))
+
+summary(tracts$n_int)
+
+tracts <- tracts %>%
+  mutate(
+    area_sqmi         = as.numeric(st_area(.)) / 27878400,   # sq ft in a sq mile
+    int_per_sqmi = n_int / area_sqmi
+  )
+
+
+f7 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + int_per_sqmi
+
+m7 <- lm(f7, data = tracts)
+summary(m7)
+
+
+model_log <- model_log %>%
+  add_row(model = "m7", added = "Intersection Density",
+          cv_rmse = cv_rmse(f7, tracts),
+          notes = "m1 + Intersection Density")
+
+# repeat for each feature
+model_log
+
+
+# Model 8: All Previous + Intersection Density
+tracts <- tracts %>%
+  mutate(n_int = lengths(st_intersects(., int)))
+
+summary(tracts$n_int)
+
+tracts <- tracts %>%
+  mutate(
+    area_sqmi         = as.numeric(st_area(.)) / 27878400,   # sq ft in a sq mile
+    int_per_sqmi = n_int / area_sqmi
+  )
+
+
+f8 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + dist_rail_mi + septa_stop_mi + indego_mi + int_per_sqmi
+
+m8 <- lm(f8, data = tracts)
+summary(m8)
+
+
+model_log <- model_log %>%
+  add_row(model = "m8", added = "Intersection Density",
+          cv_rmse = cv_rmse(f8, tracts),
+          notes = "All Previous + Intersection Density")
+
+# repeat for each feature
+model_log
+
+# Model 9: Number of Parking Permits 
+tracts <- tracts %>%
+  mutate(n_permits = lengths(st_intersects(., parking)))
+
+summary(tracts$n_permits)
+
+f9 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + n_permits
+
+m9 <- lm(f9, data = tracts)
+summary(m9)
+
+
+model_log <- model_log %>%
+  add_row(model = "m9", added = "Permitted Parking",
+          cv_rmse = cv_rmse(f9, tracts),
+          notes = "m1 + Permitted Parking")
+
+# repeat for each feature
+model_log
+
+# Model 10: All Previous + Permitted Parking
+f10 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + dist_rail_mi + septa_stop_mi + indego_mi + int_per_sqmi + n_permits
+
+m10 <- lm(f10, data = tracts)
+summary(m10)
+
+
+model_log <- model_log %>%
+  add_row(model = "m10", added = "m8 + m9",
+          cv_rmse = cv_rmse(f10, tracts),
+          notes = "All Previous + Permitted Parking")
+
+# repeat for each feature
+model_log %>%
+  arrange(cv_rmse)
+
+
+```
+
+
+After looking at each spatial feature and its individual contribution, it seems that the best one (has the lowest RMSE) is Model 8, which includes all the previous features and intersection density. This is followed by Model 10, which is for all previous features and number of permitted parking spaces. 
+
+Overall, adding more features improved the model. However, interestingly, when added to the base model alone, permitted parking (m9), Nearest SEPTA Stop (m3), and Nearest Rail Station (m2) all made the RMSE worse. This may be because there are not enough observations (in the case of permitted parking) or because there are too many SEPTA and Rail stops to be helpful.
+
+---
+
+## Part 5: Transforming features
+
+
+We transform varibles using a log, a squared term, and a categorical variable. We choose which variables to transform based on their respective scatterplots.
+
+```{r}
+#| label: my-transforms
+
+## Check new variables for need to log
+
+# dist_rail_mi
+ggplot(tracts, aes(x = dist_rail_mi)) + geom_histogram(bins = 30) + theme_minimal()
+ggplot(tracts, aes(x = septa_stop_mi)) + geom_histogram(bins = 30) + theme_minimal()
+ggplot(tracts, aes(x = indego_mi)) + geom_histogram(bins = 30) + theme_minimal()
+ggplot(tracts, aes(x = int_per_sqmi)) + geom_histogram(bins = 30) + theme_minimal()
+
+#Log septa_stop_mi
+ggplot(tracts, aes(x = log1p(septa_stop_mi))) + geom_histogram(bins = 30) + theme_minimal()
+
+f_log1 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + log1p(septa_stop_mi)
+
+model_log <- model_log %>%
+  add_row(model = "m11", added = "log of septa_stop_mi",
+          cv_rmse = cv_rmse(f_log1, tracts),
+          notes = "log of septa_stop_mi")
+
+# Log indego_mi
+ggplot(tracts, aes(x = log1p(indego_mi))) + geom_histogram(bins = 30) + theme_minimal()
+
+
+f_log2 <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + log1p(indego_mi) + int_per_sqmi
+
+model_log <- model_log %>%
+  add_row(model = "m12", added = "log of indego_mi",
+          cv_rmse = cv_rmse(f_log2, tracts),
+          notes = "log of indego_mi")
+
+
+## Check new variables for need to square
+
+#dist_rail_mi
+ggplot(tracts, aes(x = dist_rail_mi, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#septa_stop_mi
+ggplot(tracts, aes(x = septa_stop_mi, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#indego_mi
+ggplot(tracts, aes(x = indego_mi, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+#int_per_sqmi
+ggplot(tracts, aes(x = int_per_sqmi, y = y)) + geom_point(alpha = 0.5) +
+geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+
+# Square int_per_sqmi
+ggplot(tracts, aes(x = int_per_sqmi, y = y)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", formula = y ~ x + I(x^2), se = FALSE, color = "red") +
+  theme_minimal()
+
+m_sq <- lm(y ~ int_per_sqmi + I(int_per_sqmi^2), data = tracts)
+summary(m_sq)
+
+
+f_sq <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + int_per_sqmi + I(int_per_sqmi^2)
+
+model_log <- model_log %>%
+  add_row(model = "m13", added = "int_per_sqmi Squared",
+          cv_rmse = cv_rmse(f_sq, tracts),
+          notes = "int_per_sqmi Squared")
+
+
+## Categorical of dist_rail_mi
+tracts <- tracts %>%
+  mutate(
+    prox = case_when(
+      dist_rail_mi < 1 ~ "TOD",
+      dist_rail_mi < 2 ~ "Driving Distance",
+      TRUE           ~ "Far Away"
+    ),
+    ring = factor(prox, levels = c("TOD", "Driving Distance", "Far Away"))
+  )
+
+tracts %>% st_drop_geometry() %>% count(prox)
+
+m_cat <- lm(y ~ prox, data = tracts)
+summary(m_cat)
+
+f_cat <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + prox
+
+model_log <- model_log %>%
+  add_row(model = "m14", added = "dist_rail_mi Categorized",
+          cv_rmse = cv_rmse(f_cat, tracts),
+          notes = "dist_rail_mi Categorized")
+
+
+model_log %>%
+  arrange(cv_rmse)
+```
+
+It seems that Logging the distance to the nearest Indego station helped the most. Doing so helped it go from the 7th best model (m5) to the best (m12).
+
+For distance to the nearest regional rail station, we divided it into 3 categories: TOD (<1 mile), Driving Distance (<2 miles), and Far Away (>2 miles). Our reference category is Driving Distance; therefore compared to Driving Distance tracts (<2 miles), Far Away tracts have 8.5 percentage point fewer households without a car, holding everything else constant. In contrast, in comparison to Driving Distance tracts, TOD tracts (<1 mile) have 0.2 percentage point more households without a car, holding everything else constant.
+
+
+---
+
+## Part 6: Your final model
+
+We combine the features and transformations that earned their place.
+
+```{r}
+#| label: final
+f_final <- y ~ medincE + pct_renter + pct_ba + pct_aloneHH + pct_under18 + log1p(indego_mi) + log1p(septa_stop_mi) + prox + int_per_sqmi + I(int_per_sqmi^2)
+
+m_final <- lm(f_final, data = tracts)
+summary(m_final)
+
+model_log <- model_log %>%
+  add_row(model = "final", added = "Logged, Category, and Squred",
+          cv_rmse = cv_rmse(f_final, tracts),
+          notes = "Logged, Category, and Squred")
+
+model_log %>%
+  arrange(cv_rmse)
+```
+
+### Where is the final model wrong?
+
+```{r}
+#| label: resid-map-2
+tracts <- tracts %>% mutate(resid_final = residuals(m_final))
+
+#Final Model
+ggplot(tracts) +
+  geom_sf(aes(fill = resid_final), color = NA) +
+  scale_fill_gradient2(low = "#2166ac", mid = "grey95", high = "#b2182b", midpoint = 0) +
+  theme_void() +
+  labs(title = "Final model: where it's wrong",
+       subtitle = "Red = actual higher than predicted",
+       fill = "Residual")
+
+#Original Model
+ggplot(tracts) +
+  geom_sf(aes(fill = resid_m1), color = NA) +
+  scale_fill_gradient2(low = "#2166ac", mid = "grey95", high = "#b2182b", midpoint = 0) +
+  theme_void() +
+  labs(title = "Baseline model: where it's wrong",
+       subtitle = "Red = actual higher than predicted",
+       fill = "Residual")
+```
+
+Putting the final model and original model residuals maps side-by-side, we can see some drastic changes, but also some continuity. First, the clusters around Center City and North Philadelphia seemed to have shrunk, but not disappeared completely. On the other hand, we seem to have flipped our issue in the Northwest and Northeast. Whereas before we were over-predicting, now we are under-predicting. Otherwise, tracts seem to have flipped almost randomly from over- to under-predicting or vice versa.
+
+### Are the biggest misses in the least reliable tracts?
+
+```{r}
+#| label: fog
+ggplot(tracts, aes(x = y_cv, y = abs(resid_final))) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(se = FALSE) +
+  labs(x = "CV of your outcome estimate (%)", y = "Size of the miss") +
+  theme_minimal()
+```
+Both our biggest misses and most accurate predictions are within the highest (<0.25) or moderate (<0.5) reliability tracts. This range makes it difficult to draw any conclusions about the reliability of our Model across tracts.
+---
+
+## Part 7: Reflection (about 300 words)
+
+Answer in prose, drawing on your model log (incorporate our words of the day for bonus points. just kidding):
+
+1. **What helped, and what didn't?** Name the feature that lowered CV RMSE the most and the one that disappointed you most. Offer a reason for each.
+
+I was disappointed by the negative and negligible impact of permitting parking. I had hopes that this could be used as a subtle indicator of ease of car usage. While its impact was subtle, the fact that it ultimately detracted from the RMSE led me to drop it. I suspect that this ended up not being a good variable as people are not truly disinventized from owning a car purely because there are few parking permits available in their area; in other words, the need to own a car can far outpace the hassle of needing to park it.
+
+I was also disappointed by the impact of squaring density of intersections. While it worked well as a linear function, it did appear to have a small flattening out on the end, which led me to square it. However, the squared version actually performed worse than the original.
+
+2. **Read one coefficient twice.** Choose a variable in your final model. Give its β̂ reading and its ŷ reading in one sentence each.
+
+For the logged distance to the nearest Indego station, we can see that for every 1% increase in distance to a station (β̂), there predicated 0.0677 decrease in percent of households without a car, holding everything else constant.
+
+3. **What's still missing?** Look at your final residual map. Name one thing about those places you'd want to measure next, and where you might get the data.
+
+We think one key aspect that is still missing is demographic information. Race/ethnicity could also play a major role in these areas in determining the likelihood for a household to own a car.
+
+4. **How much of the remaining error might be uncertainty or statistical noise?** Use your last plot.
+
+Given that there are continued instances of spatial autocorrelation, we are skeptical that these are indeed statistical noise. Rather, they are probably some further spatial factor that we yet to account for.
+
+
+
+
